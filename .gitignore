@@ -1,8 +1,12 @@
 # Data (Large)
-raw_data/
-ncbi_data/
-results/
-common_refs/
+# Data (Large) - Keep folder structure
+raw_data/*
+!raw_data/.gitkeep
+ncbi_data/*
+!ncbi_data/.gitkeep
+results/*
+!results/.gitkeep
+# common_refs/  <-- Included (Small enough and essential)
 
 # Nextflow / Analysis
 analysis/work/
