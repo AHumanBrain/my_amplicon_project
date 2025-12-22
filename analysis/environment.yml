@@ -1,0 +1,17 @@
+name: amplicon_pipeline
+channels:
+  - bioconda
+  - conda-forge
+  - nodefaults
+
+dependencies:
+  - nextflow
+  - fastqc
+  - cutadapt
+  - bwa
+  - samtools
+  - picard
+  - gatk4
+  - deeptools
+  - multiqc
+  - openjdk=17

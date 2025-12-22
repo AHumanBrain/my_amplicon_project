@@ -1,0 +1,20 @@
+# Data (Large)
+raw_data/
+ncbi_data/
+results/
+common_refs/
+
+# Nextflow / Analysis
+analysis/work/
+analysis/.nextflow*
+.nextflow*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+design/output/
+
+# OS
+.DS_Store
+Thumbs.db
