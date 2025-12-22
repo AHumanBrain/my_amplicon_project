@@ -344,13 +344,17 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
             rev_seq = primer_results[f'PRIMER_RIGHT_{i}_SEQUENCE']
             
             try:
-                fwd_hits = run_blast_specificity_check(fwd_seq, blast_db)
-                rev_hits = run_blast_specificity_check(rev_seq, blast_db)
+                fwd_hits, _, fwd_specific, fwd_warning = run_blast_specificity_check(fwd_seq, blast_db)
+                rev_hits, _, rev_specific, rev_warning = run_blast_specificity_check(rev_seq, blast_db)
+                if fwd_warning:
+                    print(f"  {fwd_warning}")
+                if rev_warning:
+                    print(f"  {rev_warning}")
             except Exception as e:
                 print(f"Warning: BLAST check failed for {target_id} pair {i}: {e}. Skipping pair.")
                 continue 
 
-            specificity_ok = (fwd_hits == 1 and rev_hits == 1)
+            specificity_ok = (fwd_specific and rev_specific)
             
             if not force_multiprime and not specificity_ok:
                 continue 

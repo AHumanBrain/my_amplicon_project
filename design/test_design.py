@@ -5,12 +5,17 @@ Run with: pytest test_design.py -v
 import pytest
 import tempfile
 import os
+import sys
+import importlib.util
 from io import StringIO
 from Bio.SeqRecord import SeqRecord
 from Bio.Seq import Seq
 
-# Import the module under test
-import design_v7_9 as design
+# Import the module with dots in filename using importlib
+spec = importlib.util.spec_from_file_location("design", "design_v7.9.py")
+design = importlib.util.module_from_spec(spec)
+sys.modules["design"] = design
+spec.loader.exec_module(design)
 
 
 class TestParseGff:
