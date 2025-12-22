@@ -57,6 +57,74 @@ conda activate amplicon_pipeline
 
 ## 🧬 Workflow
 
+### Workflow Diagram
+
+```mermaid
+flowchart TD
+    subgraph INPUTS["📥 INPUTS"]
+        A1[("🧬 Reference Genome<br/>common_refs/*.fna")]
+        A2[("📋 Gene Annotation<br/>common_refs/*.gff")]
+        A3[("📝 Target Gene List<br/>design/targets/*.txt")]
+        A4[("🧪 FASTQ Reads<br/>raw_data/*_R1/R2.fastq.gz")]
+    end
+
+    subgraph DESIGN["🎯 PRIMER DESIGN"]
+        B1["design_v7.9.py"]
+        B2[/"primers.csv<br/>(Order Sheet)"/]
+        B3[/"primers.bed<br/>(Target Regions)"/]
+        B4[/"primers_trimming.fasta<br/>(Primer Seqs)"/]
+    end
+
+    subgraph SIMULATION["🔬 OPTIONAL: SIMULATION"]
+        C1["generate_simulated_fastq.py"]
+        C2[/"Simulated FASTQs<br/>with injected SNVs"/]
+    end
+
+    subgraph ANALYSIS["⚙️ NEXTFLOW PIPELINE"]
+        D1["FASTQC"]
+        D2["TRIM_PRIMERS<br/>(cutadapt)"]
+        D3["ALIGN<br/>(BWA-MEM)"]
+        D4["SORT_INDEX<br/>(samtools)"]
+        D5["VARIANT_CALLING<br/>(GATK HaplotypeCaller)"]
+        D6["PLOT_COVERAGE"]
+        D7["MULTIQC"]
+    end
+
+    subgraph OUTPUTS["📤 OUTPUTS"]
+        E1[("📊 VCF<br/>variants/*.vcf.gz")]
+        E2[("📈 Coverage Report<br/>coverage/*.html")]
+        E3[("📋 MultiQC Report<br/>multiqc/*.html")]
+        E4[("🗂️ BAM Files<br/>bams/*.sorted.bam")]
+    end
+
+    %% Design Flow
+    A1 --> B1
+    A2 --> B1
+    A3 --> B1
+    B1 --> B2 & B3 & B4
+
+    %% Simulation Flow
+    A1 --> C1
+    B3 --> C1
+    C1 --> C2
+    C2 -.-> A4
+
+    %% Analysis Flow
+    A4 --> D1
+    A4 --> D2
+    B4 --> D2
+    D2 --> D3
+    A1 --> D3
+    D3 --> D4
+    D4 --> D5 & D6
+    B3 --> D6
+    D1 & D2 --> D7
+    D5 --> E1
+    D6 --> E2
+    D7 --> E3
+    D4 --> E4
+```
+
 ### Step 1: Design Primers
 
 ```bash
