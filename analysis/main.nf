@@ -142,7 +142,6 @@ process PREP_INTERVALS {
 process PICARD_METRICS {
     tag "$sample_id"
     publishDir "${params.outdir}/qc/picard", mode: 'copy'
-    errorStrategy 'ignore'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -227,6 +226,23 @@ process MULTIQC {
     """
 }
 
+process PLOT_COVERAGE {
+    tag "$sample_id"
+    publishDir "${params.outdir}/coverage", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path bed
+
+    output:
+    path "${sample_id}_coverage_report.html", emit: html
+
+    script:
+    """
+    python ${projectDir}/plot_coverage.py -b $bam -t $bed -o ${sample_id}_coverage_report.html
+    """
+}
+
 // --- Workflow ---
 
 workflow {
@@ -270,11 +286,15 @@ workflow {
         BUILD_INDICES.out.dict
     )
 
-    // 10. Aggregate Report
+    // 10. Coverage Report
+    PLOT_COVERAGE(SORT_INDEX_BAM.out.sorted_bam, params.bed)
+
+    // 11. Aggregate Report
     // Mix all QC outputs into one channel for MultiQC
     FASTQC.out.zip
         .mix(TRIM_PRIMERS.out.log)
         .mix(PICARD_METRICS.out)
+        .mix(PLOT_COVERAGE.out.html)
         .collect()
         .set { multiqc_inputs }
 

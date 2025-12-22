@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Data directories (mount these at runtime)
+raw_data/*
+!raw_data/.gitkeep
+results/*
+!results/.gitkeep
+ncbi_data/*
+!ncbi_data/.gitkeep
+
+# Nextflow work directories
+analysis/work/
+analysis/.nextflow*
+.nextflow*
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Artifacts
+*.gemini/

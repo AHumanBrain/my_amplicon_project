@@ -1,0 +1,88 @@
+name: Test Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-design:
+    name: Test Design Script
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install design dependencies
+        run: |
+          pip install -r design/requirements.txt
+      
+      - name: Run unit tests
+        run: |
+          cd design
+          pytest test_design.py -v --tb=short
+
+  test-pipeline:
+    name: Test Analysis Pipeline
+    runs-on: ubuntu-latest
+    needs: test-design
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Micromamba
+        uses: mamba-org/setup-micromamba@v1
+        with:
+          environment-file: analysis/environment.yml
+          environment-name: amplicon_pipeline
+          cache-environment: true
+      
+      - name: Verify tool installations
+        shell: bash -el {0}
+        run: |
+          micromamba activate amplicon_pipeline
+          nextflow -version
+          bwa 2>&1 | head -1 || true
+          samtools --version | head -1
+      
+      - name: Create test data directories
+        run: |
+          mkdir -p raw_data results common_refs design/output
+      
+      - name: Create minimal test genome
+        run: |
+          echo ">NC_000913.3" > common_refs/ecoli_genome.cleaned.fna
+          echo "ATGCATGCATGCATGCATGCATGCATGCATGCATGC" >> common_refs/ecoli_genome.cleaned.fna
+      
+      - name: Create minimal test files
+        run: |
+          # Create minimal BED
+          echo -e "NC_000913.3\t0\t36\ttestAmplicon" > design/output/final_primers_pool_1.bed
+          
+          # Create minimal primers FASTA
+          echo -e ">FWD_test\nATGCATGC" > design/output/final_primers_pool_1_trimming.fasta
+          echo -e ">REV_test\nGCATGCAT" >> design/output/final_primers_pool_1_trimming.fasta
+          
+          # Create minimal FASTQ
+          echo -e "@read1\nATGCATGCATGCATGC\n+\nIIIIIIIIIIIIIIII" | gzip > raw_data/TestSample_R1.fastq.gz
+          echo -e "@read1\nGCATGCATGCATGCAT\n+\nIIIIIIIIIIIIIIII" | gzip > raw_data/TestSample_R2.fastq.gz
+      
+      - name: Run pipeline (dry-run)
+        shell: bash -el {0}
+        run: |
+          micromamba activate amplicon_pipeline
+          cd analysis
+          nextflow run main.nf -profile conda --outdir ../results -preview
+      
+      - name: Verify workflow structure
+        run: |
+          echo "Pipeline dry-run completed successfully!"
+          ls -la analysis/

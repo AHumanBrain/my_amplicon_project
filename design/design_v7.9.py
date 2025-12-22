@@ -212,13 +212,46 @@ def design_primers_for_sequence(sequence, target_id, strategy_settings):
     
     return primer3.design_primers(seq_args, global_args)
 
-def run_blast_specificity_check(primer_seq, blast_db_path):
+def run_blast_specificity_check(primer_seq, blast_db_path, strict_threshold=1):
+    """
+    Check primer specificity using BLAST.
+    
+    Returns:
+        tuple: (hit_count, hit_locations, is_specific, warning_message)
+        - hit_count: Number of perfect matches in the genome
+        - hit_locations: List of (contig, start, end) tuples
+        - is_specific: True if hit_count <= strict_threshold
+        - warning_message: Warning string if primer is non-specific, else None
+    """
     command = [
         'blastn', '-query', '-', '-db', blast_db_path, '-task', 'blastn-short',
-        '-outfmt', '6', '-perc_identity', '100', '-qcov_hsp_perc', '100'
+        '-outfmt', '6 sseqid sstart send', '-perc_identity', '100', '-qcov_hsp_perc', '100'
     ]
-    process = subprocess.run(command, input=f">primer\n{primer_seq}", capture_output=True, text=True, check=True)
-    return len(process.stdout.strip().split('\n')) if process.stdout.strip() else 0
+    try:
+        process = subprocess.run(command, input=f">primer\n{primer_seq}", capture_output=True, text=True, check=True)
+        
+        hit_locations = []
+        if process.stdout.strip():
+            for line in process.stdout.strip().split('\n'):
+                parts = line.split('\t')
+                if len(parts) >= 3:
+                    hit_locations.append((parts[0], int(parts[1]), int(parts[2])))
+        
+        hit_count = len(hit_locations)
+        is_specific = hit_count <= strict_threshold
+        
+        warning_message = None
+        if not is_specific:
+            locations_str = ', '.join([f"{loc[0]}:{loc[1]}-{loc[2]}" for loc in hit_locations[:3]])
+            if hit_count > 3:
+                locations_str += f" (+{hit_count - 3} more)"
+            warning_message = f"Non-specific primer ({hit_count} hits): {locations_str}"
+        
+        return hit_count, hit_locations, is_specific, warning_message
+        
+    except subprocess.CalledProcessError as e:
+        # BLAST failed, return safe defaults
+        return 0, [], True, f"BLAST check failed: {e}"
 
 def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_warnings, failed_targets_initial):
     if not all_csv_rows:

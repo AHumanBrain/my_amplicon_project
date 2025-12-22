@@ -1,0 +1,7 @@
+{
+    "genome": "../common_refs/ecoli_genome.cleaned.fna",
+    "primers": "../design/output/final_primers_pool_1_trimming.fasta",
+    "bed": "../design/output/final_primers_pool_1.bed",
+    "reads": "../raw_data/*_R{1,2}.fastq.gz",
+    "outdir": "../results"
+}
