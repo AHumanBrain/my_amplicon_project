@@ -43,7 +43,7 @@ def parse_per_target_coverage(coverage_file):
     return targets
 
 
-def generate_html_report(picard_metrics, per_target_stats, output_file):
+def generate_html_report(picard_metrics, per_target_stats, output_file, feedback_file):
     """Generate an enhanced HTML report with balancing recommendations."""
     
     total_amplicons = len(per_target_stats)
@@ -221,7 +221,6 @@ def generate_html_report(picard_metrics, per_target_stats, output_file):
         f.write(html)
         
     # Also write JSON feedback for v8.0 design script
-    feedback_file = Path(output_file).parent / "primer_balancing_feedback.json"
     with open(feedback_file, 'w') as f:
         json.dump({
             'overall_metrics': {
@@ -239,6 +238,7 @@ def main():
     parser.add_argument('-m', '--metrics', required=True, help='Picard TargetedPcrMetrics file')
     parser.add_argument('-c', '--coverage', required=True, help='Picard per-target coverage file')
     parser.add_argument('-o', '--output', default='coverage_report.html', help='Output HTML report')
+    parser.add_argument('-j', '--json', default='primer_balancing_feedback.json', help='Output JSON feedback file')
     
     args = parser.parse_args()
     
@@ -249,8 +249,8 @@ def main():
     per_target_stats = parse_per_target_coverage(args.coverage)
     
     print("Generating enhanced report...")
-    generate_html_report(picard_metrics, per_target_stats, args.output)
-    print(f"Completed! Reports at {args.output}")
+    generate_html_report(picard_metrics, per_target_stats, args.output, args.json)
+    print(f"Completed! Reports at {args.output} and {args.json}")
 
 
 if __name__ == '__main__':

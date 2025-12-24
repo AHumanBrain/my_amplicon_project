@@ -41,7 +41,7 @@ def mutate_sequence(sequence, mutation_rate=0.01):
             
     return "".join(seq_list), mutations
 
-def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix, non_uniform=False):
+def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix, non_uniform=False, thermal_bias=None):
     r1_records = []
     r2_records = []
     
@@ -60,14 +60,25 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
            print(f"   -> Injected {len(mutations)} SNVs into {name}")
 
         # Determine num_pairs for this amplicon
+        current_coverage = coverage
+        
+        if thermal_bias:
+            # Simple simulation: amplicons have an 'optimal' temp around 62C
+            # Coverage drops off as thermal_bias moves away from optimal
+            # We'll use the amplicon name or a hash to vary the 'optimal' temp slightly per-target
+            target_opt = 62.0 + (hash(name) % 5) - 2.5 # 60 to 65C range
+            diff = abs(thermal_bias - target_opt)
+            # Scaling factor: 1.0 at opt, drops by 0.2 for every degree of diff
+            scaling = max(0.05, 1.0 - (diff * 0.2))
+            current_coverage = int(coverage * scaling)
+
         if non_uniform:
             # Randomly vary coverage between 10% and 200% of target
-            # This helps test the "Balancing Recommendations" logic
-            num_pairs = int(coverage * random.uniform(0.1, 2.0))
+            num_pairs = int(current_coverage * random.uniform(0.1, 2.0))
         else:
-            num_pairs = coverage
+            num_pairs = current_coverage
         
-        print(f"   -> Generating {num_pairs} pairs for {name}")
+        print(f"   -> Generating {num_pairs} pairs for {name} (Bias: {thermal_bias}C)")
         
         for i in range(num_pairs):
             # R1: Forward strand, 5' end
@@ -106,6 +117,7 @@ def main():
     parser.add_argument('--sample-name', default="Simulated_Sample", help="Sample name for output files")
     parser.add_argument('--coverage', type=int, default=100, help="Number of read pairs per amplicon")
     parser.add_argument('--non-uniform', action='store_true', help="Introduce coverage non-uniformity")
+    parser.add_argument('--thermal-bias', type=float, help="Simulated annealing temperature (C). Affects coverage of amplicons based on proximity to 60C.")
     
     args = parser.parse_args()
     
@@ -117,11 +129,9 @@ def main():
     genome = load_genome(args.genome)
     intervals = parse_bed(args.bed)
     
-    generate_fastq_records(intervals, genome, args.coverage, 150, output_prefix, non_uniform=args.non_uniform)
+    generate_fastq_records(intervals, genome, args.coverage, 150, output_prefix, 
+                           non_uniform=args.non_uniform, thermal_bias=args.thermal_bias)
     print("Simulation complete.")
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()

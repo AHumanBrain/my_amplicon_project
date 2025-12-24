@@ -1,210 +1,179 @@
-# My Amplicon Project
+# My Amplicon Project: Comprehensive Instruction Manual 🧬
 
-An integrated **Multiplex PCR Primer Designer** and **Amplicon Sequencing Analyzer** for targeted sequencing workflows.
-
----
-
-## 📂 Project Structure
-
-```
-my_amplicon_project/
-├── common_refs/           # Reference genomes & annotations
-├── design/                # Primer design tool
-│   ├── design.py
-│   ├── test_design.py     # Unit tests (pytest)
-│   ├── targets/           # Gene lists
-│   └── output/            # Generated primers
-├── analysis/              # Nextflow pipeline
-│   ├── main.nf
-│   ├── setup_wsl.sh       # One-click environment setup
-│   ├── run_analysis.sh    # Execution wrapper
-│   ├── plot_coverage.py   # Coverage visualization
-│   └── generate_simulated_fastq.py
-├── raw_data/              # Input FASTQ files
-├── results/               # Outputs (VCF, reports)
-├── Dockerfile             # Container build
-└── .github/workflows/     # CI/CD
-```
+Welcome to the **integrated Multiplex PCR Ecosystem**. This project provides a complete end-to-end professional workflow for designing targeted sequencing primers, simulating their performance, and analyzing real or simulated sequencing data with automated feedback loops for laboratory optimization.
 
 ---
 
-## 🚀 Quick Start
+## 🗺️ System Architecture & Workflow
 
-### Option A: Using Docker (Recommended)
-
-```bash
-# Build
-docker build -t amplicon-pipeline .
-
-# Run (mount data directories)
-docker run -v $(pwd)/raw_data:/app/raw_data \
-           -v $(pwd)/results:/app/results \
-           amplicon-pipeline
-```
-
-### Option B: WSL Setup (Windows)
-
-```bash
-# 1. Run setup script (installs Miniconda + all dependencies)
-wsl bash analysis/setup_wsl.sh
-
-# 2. Activate environment
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate amplicon_pipeline
-```
-
----
-
-## 🧬 Workflow
-
-### Workflow Diagram
+This project is divided into two primary modules: **Design** and **Analysis**, bridged by an **Automated Feedback Loop**.
 
 ```mermaid
 flowchart TD
-    subgraph INPUTS["📥 INPUTS"]
-        A1[("🧬 Reference Genome<br/>common_refs/*.fna")]
-        A2[("📋 Gene Annotation<br/>common_refs/*.gff")]
-        A3[("📝 Target Gene List<br/>design/targets/*.txt")]
-        A4[("🧪 FASTQ Reads<br/>raw_data/*_R1/R2.fastq.gz")]
+    subgraph INPUTS["📥 Step 1: Inputs"]
+        A1[("🧬 Reference Genome<br/>(common_refs/*.fna)")]
+        A2[("📋 Gene Annotation<br/>(common_refs/*.gff)")]
+        A3[("📝 Target Gene List<br/>(design/targets/*.txt)")]
     end
 
-    subgraph DESIGN["🎯 PRIMER DESIGN"]
-        B1["design.py"]
-        B2[/"primers.csv<br/>(Order Sheet)"/]
-        B3[/"primers.bed<br/>(Target Regions)"/]
-        B4[/"primers_trimming.fasta<br/>(Primer Seqs)"/]
+    subgraph DESIGN["🎯 Step 2: Primer Design (design.py)"]
+        B1["Unified Design Script"]
+        B2[/"Order Sheet<br/>(design/output/*.csv)"/]
+        B3[/"Target BED<br/>(design/output/*.bed)"/]
+        B4[/"Trimming FASTA<br/>(design/output/*.fasta)"/]
     end
 
-    subgraph SIMULATION["🔬 OPTIONAL: SIMULATION"]
-        C1["generate_simulated_fastq.py"]
-        C2[/"Simulated FASTQs<br/>with injected SNVs"/]
+    subgraph LAB["🧪 Step 3: Wet Lab / Simulation"]
+        C1["Next-Gen Sequencing (NGS)"]
+        C2["OR: Simulation Script<br/>(generate_simulated_fastq.py)"]
+        C3[/"FASTQ Raw Data<br/>(raw_data/*.fastq.gz)"/]
     end
 
-    subgraph ANALYSIS["⚙️ NEXTFLOW PIPELINE"]
-        D1["FASTQC"]
-        D2["TRIM_PRIMERS<br/>(cutadapt)"]
-        D3["ALIGN<br/>(BWA-MEM)"]
-        D4["SORT_INDEX<br/>(samtools)"]
-        D5["VARIANT_CALLING<br/>(GATK HaplotypeCaller)"]
-        D6["PLOT_COVERAGE"]
-        D7["MULTIQC"]
+    subgraph ANALYSIS["⚙️ Step 4: Analysis Pipeline (Nextflow)"]
+        D1["Alignment & Metrics<br/>(BWA / GATK / Picard)"]
+        D2[/"Performance Report<br/>(results/coverage/*.html)"/]
+        D3[/"Feedback JSON<br/>(results/coverage/*_feedback.json)"/]
     end
 
-    subgraph OUTPUTS["📤 OUTPUTS"]
-        E1[("📊 VCF<br/>variants/*.vcf.gz")]
-        E2[("📈 Coverage Report<br/>coverage/*.html")]
-        E3[("📋 MultiQC Report<br/>multiqc/*.html")]
-        E4[("🗂️ BAM Files<br/>bams/*.sorted.bam")]
+    subgraph OPTIMIZE["🔄 Step 5: Optimization Loop"]
+        E1["Re-balancing Recipe<br/>(design/output/*_recipe.csv)"]
+        E2["Re-design Triggers"]
     end
 
-    %% Design Flow
-    A1 --> B1
-    A2 --> B1
-    A3 --> B1
+    %% Flow Connections
+    A1 & A2 & A3 --> B1
     B1 --> B2 & B3 & B4
-
-    %% Simulation Flow
-    A1 --> C1
-    B3 --> C1
-    C1 --> C2
-    C2 -.-> A4
-
-    %% Analysis Flow
-    A4 --> D1
-    A4 --> D2
-    B4 --> D2
-    D2 --> D3
-    A1 --> D3
-    D3 --> D4
-    D4 --> D5 & D6
-    B3 --> D6
-    D1 & D2 --> D7
-    D5 --> E1
-    D6 --> E2
-    D7 --> E3
-    D4 --> E4
+    B4 --> D1
+    B3 --> D1
+    A1 --> C2 --> C3
+    C3 --> D1
+    D1 --> D2 & D3
+    D3 -- "Loop Back" --> B1
+    B1 -- "Generate Recipe" --> E1
+    B1 -- "Trigger Re-design" --> E2
 ```
 
-### Step 1: Design Primers
+---
 
+## 🛠️ Installation & Setup
+
+### Windows (WSL / Ubuntu)
+This is the recommended environment for the full analysis pipeline.
+1.  **Run the Setup Script**:
+    ```bash
+    wsl bash analysis/setup_wsl.sh
+    ```
+    *This script installs: Miniconda, BWA, GATK, Samtools, Nextflow, Cutadapt, and Picard.*
+2.  **Activate Environment**:
+    ```bash
+    source ~/miniconda3/etc/profile.d/conda.sh
+    conda activate amplicon_pipeline
+    ```
+
+### Containerized (Docker)
+For cross-platform reproducibility:
 ```bash
-cd design
-python design.py \
-    --target-file targets/housekeeping_genes.txt \
+docker build -t amplicon-pipeline .
+docker run -v $(pwd):/app amplicon-pipeline
+```
+
+---
+
+## 🎯 Module 1: Primer Design (`design.py`)
+
+The unified design tool supports three distinct operational modes.
+
+### Mode A: Initial Multi-Gene Design
+Designing primers from scratch for a list of target genes.
+```bash
+python design/design.py \
+    --genome common_refs/ecoli_genome.cleaned.fna \
+    --gff common_refs/ecoli_annotation.gff \
+    --target-file design/targets/housekeeping_genes.txt \
     --oligo-format fwd_tailed \
     --add-hairpin-clamp
 ```
+*   **Key Argument**: `--add-hairpin-clamp` adds a smart 5' sequence to create a protective hairpin structure, preventing primer dimers during multiplexing.
 
-**Outputs** (in `design/output/`):
-- `final_primers_pool_1.csv` - Order sheet
-- `final_primers_pool_1.bed` - Target regions
-- `final_primers_pool_1_trimming.fasta` - For primer trimming
-
-### Step 2: Prepare Data
-
-**Option A: Real Data**  
-Place paired-end FASTQs in `raw_data/` (e.g., `Sample_R1.fastq.gz`)
-
-**Option B: Simulated Data**
+### Mode B: Tail-Only Customization
+Adding P5/P7 tails to existing primer sequences.
 ```bash
-wsl bash -c "source ~/miniconda3/etc/profile.d/conda.sh && \
-  conda activate amplicon_pipeline && \
-  python analysis/generate_simulated_fastq.py \
+python design/design.py \
+    --tail-fwd-file my_fwd_primers.txt \
+    --tail-rev-file my_rev_primers.txt
+```
+
+### Mode C: Automated Feedback & Re-balancing 🔄
+**Optimizing your existing pool based on analysis results.**
+```bash
+python design/design.py \
+  --feedback results/coverage/Anneal_60C_balancing_feedback.json
+```
+*   **Output**: Generates `design/output/final_primers_rebalancing_recipe.csv`.
+*   **Instruction**: This CSV tells you exactly how many microliters (uL) of each primer stock to add to your master pool to fix coverage un-evenness.
+
+---
+
+## ⚙️ Module 2: Analysis Pipeline (`main.nf`)
+
+The analysis pipeline uses **Nextflow** to orchestrate high-performance bioinformatics tools.
+
+### Running the Analysis
+Ensure your FASTQ files are in `raw_data/` and run:
+```bash
+wsl bash analysis/run_analysis.sh
+```
+
+### Sample-Specific Feedback
+Each sample processed by the pipeline produces its own feedback report in `results/coverage/`.
+- `SampleName_balancing_feedback.json`: Machine-readable results for Step 5.
+- `SampleName_coverage_report.html`: Human-readable performance dashboard.
+
+> [!NOTE]
+> In multi-sample runs (like thermal gradients), the pipeline preserves the individual metrics for *every* sample point, allowing you to choose the most representative data for re-balancing.
+
+---
+
+## 🌡️ Module 3: Simulation & Validation
+
+### Thermal Gradient Simulator
+Before going to the lab, simulate how your primers will perform across a temperature range (e.g., 60°C, 63°C, 66°C).
+```bash
+# Generate 200 reads per amplicon with a 63°C thermal bias
+python analysis/generate_simulated_fastq.py \
     --genome common_refs/ecoli_genome.cleaned.fna \
     --bed design/output/final_primers_pool_1.bed \
-    --output-dir raw_data"
+    --output-dir raw_data \
+    --sample-name Anneal_63C \
+    --coverage 200 \
+    --thermal-bias 63
 ```
 
-#### 4. Run Analysis Pipeline
-Runs the full BWA-GATK-Picard pipeline via Nextflow.
-```bash
-wsl cd analysis && bash run_analysis.sh
-```
+---
 
-### 📊 Reports & Metrics
-The pipeline generates an **Amplicon Performance & Balancing Report** (`results/coverage/Simulated_Sample_coverage_report.html`) which includes:
-- **On-Target %**: % of reads mapping to your designed amplicons.
-- **Uniformity (Fold-80)**: Quantifies sequencing efficiency across all targets.
-- **Actionable Balancing Logic**: Specifically recommends primer concentration adjustments (e.g., "Increase to 1.5x") to optimize your next wet-lab run.
-- **V8.0 Feedback Export**: `primer_balancing_feedback.json` is exported for future automated pool optimization.
+## 📊 Interpreting Results
+
+### The Pool Recipe (`design/output/*_rebalancing_recipe.csv`)
+If the analysis pipeline detects that `Target_A` has 50% lower coverage than the mean, the feedback loop will calculate:
+- **Rel_Mean**: 0.5x
+- **Adjustment**: 2.0x
+- **Recommended_Vol**: 20uL (assuming a 10uL baseline).
+
+### The MultiQC Dashboard
+View `results/multiqc/multiqc_report.html` for an aggregated view of:
+- **On-Target %**: Efficiency of the design.
+- **Uniformity (Fold-80)**: How many targets required excessive sequencing to reach depth.
+- **Duplication Rate**: DNA library complexity and PCR efficiency.
 
 ---
 
-## 📊 Outputs
+## 📜 Frequently Asked Questions (FAQ)
 
-| File | Description |
-|------|-------------|
-| `results/variants/*.vcf.gz` | Variant calls |
-| `results/coverage/*_coverage_report.html` | Per-amplicon coverage |
-| `results/multiqc/multiqc_report.html` | QC summary |
-| `results/bams/*.sorted.bam` | Aligned reads (for IGV) |
+**Q: Where is my final pool recipe?**  
+A: By default, it is saved in **`design/output/final_primers_rebalancing_recipe.csv`**.
 
----
+**Q: Which sample is being reported in the feedback JSON?**  
+A: Each sample has its own file in `results/coverage/` (e.g., `Anneal_60C_balancing_feedback.json`). You must point Step 5 to the specific JSON you want to optimize against.
 
-## 🧪 Testing
-
-### Unit Tests
-```bash
-cd design
-pip install pytest
-pytest test_design.py -v
-```
-
-### CI/CD
-GitHub Actions automatically runs tests on push to `main`. See `.github/workflows/test-pipeline.yml`.
-
----
-
-## 🛠️ Troubleshooting
-
-| Error | Cause | Fix |
-|-------|-------|-----|
-| "Bad input / Non-standard base" | CRLF line endings | `tr -d '\r' < file > fixed` |
-| "Process requirement exceeds memory" | WSL RAM limit | Edit `nextflow.config`: `memory = '4 GB'` |
-| Picard metrics failed | Interval list mismatch | Non-critical (ignored) |
-
----
-
-## 📜 License
-
-MIT
+**Q: Can I use single-end data?**  
+A: Yes. The pipeline automatically detects SE vs PE FASTQs and adjusts the alignment and trimming parameters accordingly.

@@ -53,15 +53,25 @@ process TRIM_PRIMERS {
     // Using -g (5' adapter) for R1 and -G (5' adapter) for R2
     // Assuming primers are anchored at the 5' end.
     script:
-    """
-    cutadapt \
-    -g file:${primers} \
-    -G file:${primers} \
-    -o ${sample_id}_R1.trimmed.fastq.gz \
-    -p ${sample_id}_R2.trimmed.fastq.gz \
-    --discard-untrimmed \
-    ${reads[0]} ${reads[1]} > ${sample_id}_cutadapt.log
-    """
+    if (reads instanceof List && reads.size() == 2) {
+        """
+        cutadapt \
+        -g file:${primers} \
+        -G file:${primers} \
+        -o ${sample_id}_R1.trimmed.fastq.gz \
+        -p ${sample_id}_R2.trimmed.fastq.gz \
+        --discard-untrimmed \
+        ${reads[0]} ${reads[1]} > ${sample_id}_cutadapt.log
+        """
+    } else {
+        """
+        cutadapt \
+        -g file:${primers} \
+        -o ${sample_id}.trimmed.fastq.gz \
+        --discard-untrimmed \
+        ${reads} > ${sample_id}_cutadapt.log
+        """
+    }
 }
 
 process BUILD_INDICES {
@@ -98,10 +108,17 @@ process ALIGN {
     tuple val(sample_id), path("*.bam"), emit: bam
 
     script:
-    """
-    bwa mem -t 4 -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads[0]} ${reads[1]} | \
-    samtools view -b - > ${sample_id}.bam
-    """
+    if (reads instanceof List && reads.size() == 2) {
+        """
+        bwa mem -t 4 -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads[0]} ${reads[1]} | \
+        samtools view -b - > ${sample_id}.bam
+        """
+    } else {
+        """
+        bwa mem -t 4 -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads} | \
+        samtools view -b - > ${sample_id}.bam
+        """
+    }
 }
 
 process SORT_INDEX_BAM {
@@ -266,23 +283,25 @@ process PLOT_COVERAGE {
 
     output:
     path "${sample_id}_coverage_report.html", emit: html
-    path "primer_balancing_feedback.json", emit: json
+    path "${sample_id}_balancing_feedback.json", emit: json
 
     script:
     """
     python ${projectDir}/plot_coverage.py \
     -m $pcr_metrics \
     -c $target_coverage \
-    -o ${sample_id}_coverage_report.html
+    -o ${sample_id}_coverage_report.html \
+    -j ${sample_id}_balancing_feedback.json
     """
 }
 
 // --- Workflow ---
 
 workflow {
-    // 1. Channel for reads
+    // 1. Channel for reads (auto-detects SE/PE)
+    // We try to match pairs first, then individuals
     Channel
-        .fromFilePairs(params.reads)
+        .fromFilePairs(params.reads, size: -1) { file -> file.name.replaceAll(/_R[12].*/, '') }
         .set { read_pairs_ch }
 
     // 2. Build Reference Indices (runs once)
