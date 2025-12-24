@@ -88,7 +88,7 @@ Designing primers from scratch for a list of target genes.
 ```bash
 python design/design.py \
     --genome common_refs/ecoli_genome.cleaned.fna \
-    --gff common_refs/ecoli_annotation.gff \
+    --gff common_refs/genomic.gff \
     --target-file design/targets/housekeeping_genes.txt \
     --oligo-format fwd_tailed \
     --add-hairpin-clamp
