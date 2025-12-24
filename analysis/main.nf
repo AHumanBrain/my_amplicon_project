@@ -139,18 +139,46 @@ process PREP_INTERVALS {
     """
 }
 
+process MARK_DUPLICATES {
+    tag "$sample_id"
+    publishDir "${params.outdir}/bams", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.marked.bam"), path("${sample_id}.marked.bai"), emit: marked_bam
+    path "${sample_id}.mark_dups_metrics.txt", emit: metrics
+
+    script:
+    """
+    picard MarkDuplicates \
+    I=$bam \
+    O=${sample_id}.marked.bam \
+    M=${sample_id}.mark_dups_metrics.txt \
+    CREATE_INDEX=true \
+    VALIDATION_STRINGENCY=SILENT \
+    TAGGING_POLICY=All \
+    ASSUME_SORTED=true
+    """
+}
+
 process PICARD_METRICS {
     tag "$sample_id"
     publishDir "${params.outdir}/qc/picard", mode: 'copy'
-    errorStrategy 'ignore'  // Interval list header mismatch - non-critical for variant calling
+    errorStrategy 'ignore' // Non-critical if headers differ, though we try to fix
 
     input:
     tuple val(sample_id), path(bam), path(bai)
     path fasta
+    path fai
+    path dict
     path interval_list
 
     output:
-    path "*_metrics.txt"
+    path "${sample_id}_pcr_metrics.txt", emit: pcr_metrics
+    path "${sample_id}.per_target_coverage.txt", emit: target_coverage
+    path "*.{txt,pdf}", emit: all_metrics
 
     script:
     """
@@ -162,11 +190,11 @@ process PICARD_METRICS {
     picard CollectInsertSizeMetrics \
     I=$bam O=${sample_id}_insert_size_metrics.txt H=${sample_id}_insert_size_histogram.pdf
 
-    # 3. Targeted PCR Metrics
     picard CollectTargetedPcrMetrics \
     I=$bam O=${sample_id}_pcr_metrics.txt \
     AMPLICON_INTERVALS=$interval_list \
     TARGET_INTERVALS=$interval_list \
+    PER_TARGET_COVERAGE=${sample_id}.per_target_coverage.txt \
     R=$fasta
     """
 }
@@ -233,14 +261,19 @@ process PLOT_COVERAGE {
 
     input:
     tuple val(sample_id), path(bam), path(bai)
-    path bed
+    path pcr_metrics
+    path target_coverage
 
     output:
     path "${sample_id}_coverage_report.html", emit: html
+    path "primer_balancing_feedback.json", emit: json
 
     script:
     """
-    python ${projectDir}/plot_coverage.py -b $bam -t $bed -o ${sample_id}_coverage_report.html
+    python ${projectDir}/plot_coverage.py \
+    -m $pcr_metrics \
+    -c $target_coverage \
+    -o ${sample_id}_coverage_report.html
     """
 }
 
@@ -270,32 +303,42 @@ workflow {
     // 7. Sort & Index
     SORT_INDEX_BAM(ALIGN.out.bam)
 
-    // 8. Metrics & Visualization
+    // 8. Mark Duplicates (Informational)
+    MARK_DUPLICATES(SORT_INDEX_BAM.out.sorted_bam)
+
+    // 9. Metrics & Visualization
     PICARD_METRICS(
         SORT_INDEX_BAM.out.sorted_bam, 
         BUILD_INDICES.out.fasta, 
+        BUILD_INDICES.out.fai,
+        BUILD_INDICES.out.dict,
         PREP_INTERVALS.out.interval_list
     )
     
-    COVERAGE_TRACKS(SORT_INDEX_BAM.out.sorted_bam)
+    COVERAGE_TRACKS(MARK_DUPLICATES.out.marked_bam) 
 
-    // 9. Variant Calling
+    // 10. Variant Calling
     VARIANT_CALLING(
-        SORT_INDEX_BAM.out.sorted_bam, 
+        MARK_DUPLICATES.out.marked_bam, 
         BUILD_INDICES.out.fasta, 
         BUILD_INDICES.out.fai, 
         BUILD_INDICES.out.dict
     )
 
-    // 10. Coverage Report
-    PLOT_COVERAGE(SORT_INDEX_BAM.out.sorted_bam, params.bed)
+    // 11. Coverage Report (Balancing Recommendations)
+    PLOT_COVERAGE(
+        MARK_DUPLICATES.out.marked_bam,
+        PICARD_METRICS.out.pcr_metrics,
+        PICARD_METRICS.out.target_coverage
+    )
 
-    // 11. Aggregate Report
+    // 12. Aggregate Report
     // Mix all QC outputs into one channel for MultiQC
     FASTQC.out.zip
         .mix(TRIM_PRIMERS.out.log)
-        .mix(PICARD_METRICS.out)
+        .mix(PICARD_METRICS.out.all_metrics)
         .mix(PLOT_COVERAGE.out.html)
+        .mix(MARK_DUPLICATES.out.metrics)
         .collect()
         .set { multiqc_inputs }
 

@@ -41,7 +41,7 @@ def mutate_sequence(sequence, mutation_rate=0.01):
             
     return "".join(seq_list), mutations
 
-def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix):
+def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix, non_uniform=False):
     r1_records = []
     r2_records = []
     
@@ -59,19 +59,21 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
         if mutations:
            print(f"   -> Injected {len(mutations)} SNVs into {name}")
 
-        # Simulate reads
-        # For simplicity in this amplicon test, we'll just generate pairs that span the whole amplicon
-        # or tiles of it. But to test the aligner, let's just create pairs starting from ends.
+        # Determine num_pairs for this amplicon
+        if non_uniform:
+            # Randomly vary coverage between 10% and 200% of target
+            # This helps test the "Balancing Recommendations" logic
+            num_pairs = int(coverage * random.uniform(0.1, 2.0))
+        else:
+            num_pairs = coverage
         
-        num_pairs = coverage # Simply output N pairs per amplicon
+        print(f"   -> Generating {num_pairs} pairs for {name}")
         
         for i in range(num_pairs):
-            # Simulate a 150bp read from each end of the amplicon (mutated)
-            
             # R1: Forward strand, 5' end
             r1_seq = mutated_seq[:read_len]
             if len(r1_seq) < read_len:
-                r1_seq = r1_seq.ljust(read_len, 'N') # Pad if short
+                r1_seq = r1_seq.ljust(read_len, 'N')
                 
             # R2: Reverse strand, 3' end (reverse complement)
             r2_seq_template = mutated_seq[-read_len:]
@@ -79,15 +81,11 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
                 r2_seq_template = r2_seq_template.rjust(read_len, 'N')
             
             r2_seq = str(Seq(r2_seq_template).reverse_complement())
-            
-            # Fake quality scores (I = score 40)
             qual = "I" * read_len
-            
             header = f"SimonSimRead:{total_reads}:{name}"
             
             r1_records.append(f"@{header} 1:N:0:1\n{r1_seq}\n+\n{qual}\n")
             r2_records.append(f"@{header} 2:N:0:1\n{r2_seq}\n+\n{qual}\n")
-            
             total_reads += 1
 
     r1_filename = f"{output_prefix}_R1.fastq.gz"
@@ -107,6 +105,7 @@ def main():
     parser.add_argument('--output-dir', required=True, help="Directory to save FASTQ files")
     parser.add_argument('--sample-name', default="Simulated_Sample", help="Sample name for output files")
     parser.add_argument('--coverage', type=int, default=100, help="Number of read pairs per amplicon")
+    parser.add_argument('--non-uniform', action='store_true', help="Introduce coverage non-uniformity")
     
     args = parser.parse_args()
     
@@ -118,8 +117,11 @@ def main():
     genome = load_genome(args.genome)
     intervals = parse_bed(args.bed)
     
-    generate_fastq_records(intervals, genome, args.coverage, 150, output_prefix)
+    generate_fastq_records(intervals, genome, args.coverage, 150, output_prefix, non_uniform=args.non_uniform)
     print("Simulation complete.")
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()

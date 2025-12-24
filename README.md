@@ -155,13 +155,18 @@ wsl bash -c "source ~/miniconda3/etc/profile.d/conda.sh && \
     --output-dir raw_data"
 ```
 
-### Step 3: Run Analysis
-
+#### 4. Run Analysis Pipeline
+Runs the full BWA-GATK-Picard pipeline via Nextflow.
 ```bash
-wsl bash -c "source ~/miniconda3/etc/profile.d/conda.sh && \
-  conda activate amplicon_pipeline && \
-  cd analysis && bash run_analysis.sh"
+wsl cd analysis && bash run_analysis.sh
 ```
+
+### 📊 Reports & Metrics
+The pipeline generates an **Amplicon Performance & Balancing Report** (`results/coverage/Simulated_Sample_coverage_report.html`) which includes:
+- **On-Target %**: % of reads mapping to your designed amplicons.
+- **Uniformity (Fold-80)**: Quantifies sequencing efficiency across all targets.
+- **Actionable Balancing Logic**: Specifically recommends primer concentration adjustments (e.g., "Increase to 1.5x") to optimize your next wet-lab run.
+- **V8.0 Feedback Export**: `primer_balancing_feedback.json` is exported for future automated pool optimization.
 
 ---
 
