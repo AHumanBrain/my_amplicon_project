@@ -17,7 +17,8 @@ analysis/.nextflow*
 __pycache__/
 *.py[cod]
 *$py.class
-design/output/
+design/output/*
+!design/output/.gitkeep
 
 # OS
 .DS_Store
