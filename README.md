@@ -10,7 +10,7 @@ An integrated **Multiplex PCR Primer Designer** and **Amplicon Sequencing Analyz
 my_amplicon_project/
 ├── common_refs/           # Reference genomes & annotations
 ├── design/                # Primer design tool
-│   ├── design_v7.9.py
+│   ├── design.py
 │   ├── test_design.py     # Unit tests (pytest)
 │   ├── targets/           # Gene lists
 │   └── output/            # Generated primers
@@ -69,7 +69,7 @@ flowchart TD
     end
 
     subgraph DESIGN["🎯 PRIMER DESIGN"]
-        B1["design_v7.9.py"]
+        B1["design.py"]
         B2[/"primers.csv<br/>(Order Sheet)"/]
         B3[/"primers.bed<br/>(Target Regions)"/]
         B4[/"primers_trimming.fasta<br/>(Primer Seqs)"/]
@@ -129,7 +129,7 @@ flowchart TD
 
 ```bash
 cd design
-python design_v7.9.py \
+python design.py \
     --target-file targets/housekeeping_genes.txt \
     --oligo-format fwd_tailed \
     --add-hairpin-clamp

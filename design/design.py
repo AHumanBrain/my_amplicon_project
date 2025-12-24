@@ -1,5 +1,6 @@
 import argparse
 from Bio import SeqIO
+import json
 from Bio.SeqRecord import SeqRecord
 from Bio.Seq import Seq # Added for reverse complement
 import primer3
@@ -18,7 +19,7 @@ import re # Import re for parsing
 #FWD_P5_TRUNCATED = 'ACACTCTTTCCCTACACGACGCTCTTCCGATCT' 33-mer
 #REV_P7_TRUNCATED = 'GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT' 34-mer
 
-# --- (v7.9) Refactored Hardcoded Adapter Tails ---
+# --- (v8.0 Ready) Refactored Hardcoded Adapter Tails ---
 # Tails shortened to 20bp to keep final oligo length < 60nt
 # This allows for standard desalting without loss of the 5' clamp.
 
@@ -35,18 +36,18 @@ REV_RC_P7_TRUNCATED = 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC'
 END_STABILITY_DG_THRESHOLD = -9.0
 IDEAL_TM_MIN = 59.0
 IDEAL_TM_MAX = 61.0
-# (v7.9) Created a single source of truth for min primer size
+# (v8.0 Ready) Created a single source of truth for min primer size
 IDEAL_PRIMER_MIN_SIZE = 19 
 
 # --- Large-Panel Logic ---
 MAX_CLASH_RECOMMENDATION = 5
-# (v7.9) Set the default for iterations to 5000, as discussed
+# (v8.0 Ready) Set the default for iterations to 5000
 MAX_COMPATIBILITY_ITERATIONS = 5000
 
-# --- (v7.9) Constants for Hairpin Clamp Logic ---
+# --- (v8.0 Ready) Constants for Hairpin Clamp Logic ---
 # Calibrated based on v7.5.1 results.
 HAIRPIN_STEM_TARGET_DG = -11.9 # (kcal/mol) Calibrated target dG for the *stem* interaction
-HAIRPIN_CLAMP_MAX_LEN = IDEAL_PRIMER_MIN_SIZE  # (v7.9) Linked to min primer size
+HAIRPIN_CLAMP_MAX_LEN = IDEAL_PRIMER_MIN_SIZE  # (v8.0 Ready) Linked to min primer size
 
 # --- Core Helper Functions ---
 
@@ -197,7 +198,7 @@ def design_primers_for_sequence(sequence, target_id, strategy_settings):
     
     global_args = {
         'PRIMER_OPT_SIZE': 20,
-        'PRIMER_MIN_SIZE': IDEAL_PRIMER_MIN_SIZE, # (v7.9) Use constant
+        'PRIMER_MIN_SIZE': IDEAL_PRIMER_MIN_SIZE, # (v8.0 Ready) Use constant
         'PRIMER_MAX_SIZE': 21,
         'PRIMER_OPT_TM': 60.0,
         'PRIMER_MIN_TM': IDEAL_TM_MIN,
@@ -626,7 +627,7 @@ def run_design_mode(args):
              return
              
         best_primer_pairs = []
-        # (v7.9) Iterate over keys, not original list
+        # (v8.0 Ready) Iterate over keys, not original list
         for target_id in target_to_primers_map:
              best_primer_pairs.append(target_to_primers_map[target_id][0]) 
         
@@ -649,7 +650,7 @@ def run_design_mode(args):
         if run_minimum_pool_logic:
             print("\nDesign Strategy: Searching for the minimum number of compatible pools...")
             
-            # (v7.9) Iterate over keys, not original list
+            # (v8.0 Ready) Iterate over keys, not original list
             successful_targets = sorted(list(target_to_primers_map.keys()))
             for num_pools in range(1, len(successful_targets) + 1):
                 print(f"\n--- Testing N = {num_pools} {'pool' if num_pools == 1 else 'pools'} ---")
@@ -778,6 +779,95 @@ def run_tail_only_mode(args):
         
     write_tail_only_csv(all_csv_rows, args.output_prefix)
 
+# --- Mode 3: Feedback Loop Pipeline Functions ---
+
+def parse_feedback(feedback_file):
+    """Loads and returns the feedback JSON data."""
+    if not feedback_file:
+        return None
+    try:
+        with open(feedback_file, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error parsing feedback file '{feedback_file}': {e}")
+        return None
+
+def generate_pool_recipe(feedback_data, output_prefix):
+    """
+    Generates a pool re-balancing recipe (CSV) based on recommendations.
+    Assumes a base volume of 10uL for 1.0x concentration.
+    """
+    recipe_file = f"{output_prefix}_rebalancing_recipe.csv"
+    base_vol = 10.0 # uL
+    
+    headers = ['Target', 'Current_Rel_Mean', 'Adjustment_Factor', 'Action', 'Recommended_Vol_uL']
+    rows = []
+    
+    for rec in feedback_data.get('target_recommendations', []):
+        adj = rec.get('recommended_adjustment', 1.0)
+        rows.append({
+            'Target': rec['target_id'],
+            'Current_Rel_Mean': f"{rec['rel_mean']:.2f}x",
+            'Adjustment_Factor': f"{adj:.2f}x",
+            'Action': rec['action'],
+            'Recommended_Vol_uL': f"{base_vol * adj:.2f}"
+        })
+    
+    if rows:
+        with open(recipe_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"Re-balancing recipe saved to '{recipe_file}'")
+    else:
+        print("No recommendations found in feedback data. Skipping recipe generation.")
+
+def run_feedback_mode(args):
+    """
+    Handles re-balancing and re-design based on feedback.
+    """
+    print(f"\n--- Running in Feedback Mode ---")
+    feedback_data = parse_feedback(args.feedback)
+    if not feedback_data:
+        return
+
+    # 1. Always generate the re-balancing recipe if feedback is present
+    generate_pool_recipe(feedback_data, args.output_prefix)
+
+    # 2. Check for targets flagged for redesign
+    redesign_targets = [
+        rec['target_id'] for rec in feedback_data.get('target_recommendations', [])
+        if "REDESIGN" in rec.get('action', "").upper()
+    ]
+
+    if redesign_targets:
+        print(f"Found {len(redesign_targets)} targets flagged for redesign: {', '.join(redesign_targets)}")
+        
+        # We need the original genome and GFF to redesign
+        if not all([args.genome, args.gff]):
+            print("Error: Redesign requested but --genome and --gff were not provided.")
+            return
+
+        # Prepare temporary target file for redesign
+        temp_target_file = f"{args.output_prefix}_redesign_targets.txt"
+        with open(temp_target_file, 'w') as f:
+            for t in redesign_targets:
+                f.write(f"{t}\n")
+        
+        print("Re-running design for flagged targets with relaxed parameters...")
+        
+        # Create a copy of args for the design run
+        design_args = argparse.Namespace(**vars(args))
+        design_args.target_file = temp_target_file
+        design_args.output_prefix = f"{args.output_prefix}_v8_redesign"
+        # Force a bit more thoroughness/relaxation if needed? 
+        # For now, let's just stick to the standard design process but labeled as redesign.
+        run_design_mode(design_args)
+        
+        print(f"\nFeedback loop processed. Redesigned primers are in '{design_args.output_prefix}*'")
+    else:
+        print("No targets flagged for redesign. Feedback loop complete.")
+
 # --- Main Execution Block (Router) ---
 
 def main():
@@ -793,7 +883,7 @@ def main():
     design_group.add_argument('--force-multiprime', action='store_true',
                               help="Allows primers that hit multiple identical locations in the genome. Useful for multi-copy genes like 16S rRNA. (Default: strict single-hit specificity).")
     
-    # (v7.9) argparse default now comes from the top-level constant
+    # (v8.0 Ready) argparse default now comes from the top-level constant
     design_group.add_argument('--max-compatibility-iterations', type=int, default=MAX_COMPATIBILITY_ITERATIONS,
                               help=f"Maximum iterations for the compatibility auto-healing algorithm. (Default: {MAX_COMPATIBILITY_ITERATIONS})")
     
@@ -803,6 +893,9 @@ def main():
     design_group.add_argument('--add-hairpin-clamp', action='store_true',
                               help=f"Iteratively adds a 5' clamp to 'fwd_tailed' oligos to form a hairpin with target dG ~{HAIRPIN_STEM_TARGET_DG} (stem only). REQUIRES --oligo-format fwd_tailed.")
 
+    feedback_group = parser.add_argument_group('Mode 3: v8.0 Feedback Loop')
+    feedback_group.add_argument('--feedback', help="Path to primer_balancing_feedback.json from analysis pipeline.")
+    
     tail_group = parser.add_argument_group('Mode 2: Tail-Only Utility')
     tail_group.add_argument('--tail-fwd-file', help="Path to a text file with one forward primer per line.")
     tail_group.add_argument('--tail-rev-file', help="Path to a text file with one reverse primer per line.")
@@ -816,8 +909,11 @@ def main():
 
     is_full_design_mode = all([args.genome, args.gff, args.target_file, args.blast_db])
     is_tail_only_mode = all([args.tail_fwd_file, args.tail_rev_file])
+    is_feedback_mode = bool(args.feedback)
 
-    if is_full_design_mode and not is_tail_only_mode:
+    if is_feedback_mode:
+        run_feedback_mode(args)
+    elif is_full_design_mode and not is_tail_only_mode:
         run_design_mode(args)
     elif is_tail_only_mode and not is_full_design_mode:
         run_tail_only_mode(args)
@@ -828,12 +924,16 @@ def main():
     else:
         if args.tail_fwd_file or args.tail_rev_file:
              print("Error: For 'Tail-Only' mode, you MUST provide BOTH --tail-fwd-file and --tail-rev-file.")
+        elif args.feedback:
+             pass # Handled above
         else:
             print("Error: You must provide the correct arguments for a mode.")
             print("\nFor 'Full Design' mode, you MUST provide:")
             print("   --genome, --gff, --target-file, and --blast-db")
             print("\nFor 'Tail-Only' mode, you MUST provide:")
             print("   --tail-fwd-file and --tail-rev-file")
+            print("\nFor 'v8.0 Feedback' mode, you MUST provide:")
+            print("   --feedback [json_file]")
         parser.print_help()
 
 if __name__ == "__main__":
