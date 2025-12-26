@@ -33,7 +33,7 @@ FWD_RC_P5_TRUNCATED = 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
 REV_RC_P7_TRUNCATED = 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC'
 
 # --- Design Constants ---
-END_STABILITY_DG_THRESHOLD = -9.0
+END_STABILITY_DG_THRESHOLD = -5.0 # (v8.7) Industry standard for dimer extension prevention
 IDEAL_TM_MIN = 59.0
 IDEAL_TM_MAX = 61.0
 # (v8.0 Ready) Created a single source of truth for min primer size
@@ -101,11 +101,9 @@ def add_iterative_hairpin_clamp(oligo_sequence, primer_specific_seq, target_stem
         best_stem_dg = 0.0 # dG for 0-length clamp
 
         for i in range(1, min(max_clamp_len, len(primer_specific_seq_rc)) + 1):
-            
-            # (v7.8) Use [:i] to get complement of the 3' end.
             clamp_seq = primer_specific_seq_rc[:i]
-            
-            stem_dg = primer3.calc_heterodimer(clamp_seq, primer_specific_seq).dg / 1000.0
+            # (v8.7) Use cached heterodimer function
+            stem_dg = get_heterodimer_dg(clamp_seq, primer_specific_seq)
 
             if abs(stem_dg - target_stem_dg) < abs(best_stem_dg - target_stem_dg):
                 best_oligo = clamp_seq + oligo_sequence
@@ -497,6 +495,23 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
 
     return (target_id, [], f"Could not find a specific primer pair for {target_id} even after rescue shifts.")
 
+@lru_cache(maxsize=50000)
+def check_primer_pair_compatibility(seq1, seq2, threshold_3p, threshold_full):
+    """
+    (v8.7) Cached check for two specific primer sequences.
+    Returns (True, None) or (False, reason)
+    """
+    # 3' End Stability (Bi-directional)
+    if get_end_stability_dg(seq1, seq2) < threshold_3p or \
+       get_end_stability_dg(seq2, seq1) < threshold_3p:
+        return False, "3' End Dimer"
+    
+    # Full Heterodimer
+    if get_heterodimer_dg(seq1, seq2) < threshold_full:
+        return False, "Internal Heterodimer"
+        
+    return True, None
+
 def is_compatible(candidate_pair, existing_pool_data, check_overlap):
     """Checks if a candidate pair is compatible with all primers and amplicons in the pool."""
     c_fwd = candidate_pair['csv_row']['fwd_primer_seq']
@@ -516,7 +531,6 @@ def is_compatible(candidate_pair, existing_pool_data, check_overlap):
             p_bed = p_data['bed_row'].split('\t')
             p_contig, p_start, p_end = p_bed[0], int(p_bed[1]), int(p_bed[2])
             if c_contig == p_contig:
-                # Standard overlap check: (StartA < EndB) and (EndA > StartB)
                 if c_start < p_end and c_end > p_start:
                     return False, "Genomic overlap"
 
@@ -525,14 +539,12 @@ def is_compatible(candidate_pair, existing_pool_data, check_overlap):
         p_seqs = [p_data['csv_row']['fwd_primer_seq'], p_data['csv_row']['rev_primer_seq']]
         for p_seq in p_seqs:
             for c_seq in [c_fwd, c_rev]:
-                # 3' End Stability (Bi-directional)
-                if get_end_stability_dg(c_seq, p_seq) < END_STABILITY_DG_THRESHOLD or \
-                   get_end_stability_dg(p_seq, c_seq) < END_STABILITY_DG_THRESHOLD:
-                    return False, "3' End Dimer"
-                
-                # Full Heterodimer
-                if get_heterodimer_dg(c_seq, p_seq) < MAX_HETERODIMER_DG:
-                    return False, "Internal Heterodimer"
+                # (v8.7) Use cached primer-pair checker
+                comp, reason = check_primer_pair_compatibility(c_seq, p_seq, 
+                                                             END_STABILITY_DG_THRESHOLD, 
+                                                             MAX_HETERODIMER_DG)
+                if not comp:
+                    return False, reason
                 
     return True, None
 
@@ -577,9 +589,12 @@ def pack_targets_first_fit(target_to_primers_map, overlap_detected, monte_carlo_
                 if placed: break
             
             if not placed:
-                # New pool
-                best_cand = candidates[0].copy()
-                best_cand['rank_used'] = 0
+                # (v8.7) New pool: Pick candidate with best self-thermodynamics 
+                # (highest dG = least stable dimer)
+                best_indiv_cand = max(candidates, key=lambda c: min(get_homodimer_dg(c['csv_row']['fwd_primer_seq']), 
+                                                                    get_homodimer_dg(c['csv_row']['rev_primer_seq'])))
+                best_cand = best_indiv_cand.copy()
+                best_cand['rank_used'] = candidates.index(best_indiv_cand)
                 current_pools.append([best_cand])
         
         if len(current_pools) < min_pool_count:
