@@ -36,6 +36,9 @@ else
     READS=$(realpath "../raw_data")/*_R{1,2}.fastq.gz
     OUTDIR=$(realpath -m "../results")
 
+    MODE="${2:-germline}"
+    echo "Running in mode: $MODE"
+
     nextflow run main.nf \
         -profile conda \
         --genome "$GENOME" \
@@ -43,5 +46,6 @@ else
         --bed "$BED" \
         --reads "$READS" \
         --outdir "$OUTDIR" \
+        --mode "$MODE" \
         -resume
 fi

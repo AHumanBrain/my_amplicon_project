@@ -90,27 +90,17 @@ python design/design.py \
     --genome common_refs/ecoli_genome.cleaned.fna \
     --gff common_refs/genomic.gff \
     --target-file design/targets/housekeeping_genes.txt \
-    --oligo-format fwd_tailed \
-    --add-hairpin-clamp
+    --num-candidates 50 \
+    --force-sparse
 ```
-*   **Key Argument**: `--add-hairpin-clamp` adds a smart 5' sequence to create a protective hairpin structure, preventing primer dimers during multiplexing.
+*   **Key Argument**: `--num-candidates 50` increases the search space for compatibility.
+*   **Key Argument**: `--force-sparse` ensures zero genomic overlaps between amplicons in the same pool.
 
-### Mode B: Tail-Only Customization
-Adding P5/P7 tails to existing primer sequences.
-```bash
-python design/design.py \
-    --tail-fwd-file my_fwd_primers.txt \
-    --tail-rev-file my_rev_primers.txt
-```
-
-### Mode C: Automated Feedback & Re-balancing 🔄
-**Optimizing your existing pool based on analysis results.**
-```bash
-python design/design.py \
-  --feedback results/coverage/Anneal_60C_balancing_feedback.json
-```
-*   **Output**: Generates `design/output/final_primers_rebalancing_recipe.csv`.
-*   **Instruction**: This CSV tells you exactly how many microliters (uL) of each primer stock to add to your master pool to fix coverage un-evenness.
+### 🧬 Advanced Multiplexing & Pool Minimization
+The v8.6 engine focuses on extreme thermodynamic safety and pool reduction.
+*   **Thermodynamic Thresholds**: Enforces heterodimer $dG > -8.0$, self-dimer $dG > -9.0$, and bi-directional 3' stability checks.
+*   **Monte Carlo Packing**: Use `--monte-carlo-iters 100` to run exhaustive randomized packing passes to find the absolute minimum number of pools.
+*   **Candidate Search Depth**: Use `--num-candidates 100` for high-plex panels (e.g., 100-plex) to maximize the "jigsaw" fit in a single tube.
 
 ---
 
@@ -121,8 +111,16 @@ The analysis pipeline uses **Nextflow** to orchestrate high-performance bioinfor
 ### Running the Analysis
 Ensure your FASTQ files are in `raw_data/` and run:
 ```bash
+# Standard Germline Mode
 wsl bash analysis/run_analysis.sh
+
+# Somatic / Low-Frequency Mode (High Sensitivity)
+wsl bash analysis/run_analysis.sh params.json somatic
 ```
+
+### Analysis Modes
+- **Germline (Default)**: Powered by `GATK HaplotypeCaller`. Best for high-frequency inheritance studies.
+- **Somatic**: Powered by `GATK Mutect2`. Optimized for sensitive detection of low-frequency variants (e.g., cancer research, mixed bacterial populations).
 
 ### Sample-Specific Feedback
 Each sample processed by the pipeline produces its own feedback report in `results/coverage/`.

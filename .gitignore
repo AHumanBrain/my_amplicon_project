@@ -1,22 +1,24 @@
 # Data (Large)
-# Data (Large) - Keep folder structure
 raw_data/*
 !raw_data/.gitkeep
 ncbi_data/*
 !ncbi_data/.gitkeep
 results/*
 !results/.gitkeep
-# common_refs/  <-- Included (Small enough and essential)
+common_refs/*.fna
+common_refs/*.fasta
+common_refs/*.cleaned*
 
 # Nextflow / Analysis
-analysis/work/
-analysis/.nextflow*
 .nextflow*
+work/
 
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Design Outputs (Ignore transient results)
 design/output/*
 !design/output/.gitkeep
 

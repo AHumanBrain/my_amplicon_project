@@ -8,6 +8,7 @@ params.genome = "$baseDir/../common_refs/*.cleaned.fna"
 params.primers = "$baseDir/../design/output/final_primers_pool_1_trimming.fasta" 
 params.bed = "$baseDir/../design/output/final_primers_pool_1.bed"
 params.outdir = "$baseDir/../results"
+params.mode = 'germline' // choices: germline, somatic
 
 log.info """
 A M P L I C O N   S E Q   P I P E L I N E
@@ -17,6 +18,7 @@ reads        : ${params.reads}
 primers      : ${params.primers}
 targets (BED): ${params.bed}
 outdir       : ${params.outdir}
+mode         : ${params.mode}
 """
 
 // --- Processes ---
@@ -216,9 +218,9 @@ process PICARD_METRICS {
     """
 }
 
-process VARIANT_CALLING {
+process GERMLINE_CALLING {
     tag "$sample_id"
-    publishDir "${params.outdir}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variants/germline", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -227,17 +229,41 @@ process VARIANT_CALLING {
     path dict
 
     output:
-    path "${sample_id}.vcf.gz", emit: vcf
+    path "${sample_id}.g.vcf.gz", emit: vcf
 
-    // Using PCR indel model conservatively
+    // Using PCR indel model conservatively for germline
     script:
     """
     gatk HaplotypeCaller \
     -R $fasta \
     -I $bam \
-    -O ${sample_id}.vcf.gz \
+    -O ${sample_id}.g.vcf.gz \
     --pcr-indel-model CONSERVATIVE \
     -ERC GVCF
+    """
+}
+
+process MUTECT2_CALLING {
+    tag "$sample_id"
+    publishDir "${params.outdir}/variants/somatic", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+    path fasta
+    path fai
+    path dict
+
+    output:
+    path "${sample_id}.somatic.vcf.gz", emit: vcf
+
+    // Mutect2 in tumor-only mode for low-frequency variants
+    script:
+    """
+    gatk Mutect2 \
+    -R $fasta \
+    -I $bam \
+    -O ${sample_id}.somatic.vcf.gz \
+    --native-pair-hmm-threads 4
     """
 }
 
@@ -336,13 +362,22 @@ workflow {
     
     COVERAGE_TRACKS(MARK_DUPLICATES.out.marked_bam) 
 
-    // 10. Variant Calling
-    VARIANT_CALLING(
-        MARK_DUPLICATES.out.marked_bam, 
-        BUILD_INDICES.out.fasta, 
-        BUILD_INDICES.out.fai, 
-        BUILD_INDICES.out.dict
-    )
+    // 10. Variant Calling (Conditional)
+    if (params.mode == 'somatic') {
+        MUTECT2_CALLING(
+            MARK_DUPLICATES.out.marked_bam, 
+            BUILD_INDICES.out.fasta, 
+            BUILD_INDICES.out.fai, 
+            BUILD_INDICES.out.dict
+        )
+    } else {
+        GERMLINE_CALLING(
+            MARK_DUPLICATES.out.marked_bam, 
+            BUILD_INDICES.out.fasta, 
+            BUILD_INDICES.out.fai, 
+            BUILD_INDICES.out.dict
+        )
+    }
 
     // 11. Coverage Report (Balancing Recommendations)
     PLOT_COVERAGE(

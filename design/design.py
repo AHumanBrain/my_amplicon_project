@@ -10,7 +10,7 @@ import subprocess
 import shutil
 import multiprocessing
 import itertools
-from functools import partial
+from functools import partial, lru_cache
 from tqdm import tqdm
 import re # Import re for parsing
 
@@ -39,6 +39,11 @@ IDEAL_TM_MAX = 61.0
 # (v8.0 Ready) Created a single source of truth for min primer size
 IDEAL_PRIMER_MIN_SIZE = 19 
 
+# --- (v8.0 Ready) Phase 2 Thermodynamic Thresholds ---
+# Lower (more negative) means stronger/worse dimerization
+MAX_HETERODIMER_DG = -8.0  # (kcal/mol) Stop heterodimers at internal secondary structures
+MAX_SELF_DIMER_DG = -9.0   # (kcal/mol) Stop primers folding back on themselves
+
 # --- Large-Panel Logic ---
 MAX_CLASH_RECOMMENDATION = 5
 # (v8.0 Ready) Set the default for iterations to 5000
@@ -57,6 +62,31 @@ def read_lines_from_file(file_path):
         return [line.strip() for line in f if line.strip()]
 
 # --- (v7.8) Corrected Helper Function for Hairpin Clamps ---
+
+# --- (v8.0 Ready) Phase 2 Cached Thermodynamic Functions ---
+@lru_cache(maxsize=10000)
+def get_heterodimer_dg(seq1, seq2):
+    """Calculates worst-case dG across the entire sequence length."""
+    try:
+        return primer3.calc_heterodimer(seq1, seq2).dg / 1000.0
+    except:
+        return 0.0
+
+@lru_cache(maxsize=10000)
+def get_end_stability_dg(seq1, seq2):
+    """Calculates stability of the 3' end interaction."""
+    try:
+        return primer3.calc_end_stability(seq1, seq2).dg / 1000.0
+    except:
+        return 0.0
+
+@lru_cache(maxsize=10000)
+def get_homodimer_dg(seq):
+    """Calculates stability of a primer folding back on itself."""
+    try:
+        return primer3.calc_homodimer(seq).dg / 1000.0
+    except:
+        return 0.0
 
 def add_iterative_hairpin_clamp(oligo_sequence, primer_specific_seq, target_stem_dg, max_clamp_len):
     """
@@ -175,7 +205,7 @@ def parse_gff(gff_file):
         
     return gene_coords
 
-def extract_target_sequence(genome_records, gene_coords, target_id):
+def extract_target_sequence(genome_records, gene_coords, target_id, offset_bp=0):
     if target_id not in gene_coords:
         return None, None, f"Warning: Target ID '{target_id}' not found in GFF file. Skipping."
     
@@ -189,11 +219,12 @@ def extract_target_sequence(genome_records, gene_coords, target_id):
         target_info['contig'] = core_contig_id
     
     contig_seq = genome_records[target_info['contig']].seq
-    start, end = target_info['start'] - 1, target_info['end']
+    start = max(0, target_info['start'] - 1 + offset_bp)
+    end = min(len(contig_seq), target_info['end'] + offset_bp)
     target_seq = contig_seq[start:end]
     return str(target_seq), target_info, None
 
-def design_primers_for_sequence(sequence, target_id, strategy_settings):
+def design_primers_for_sequence(sequence, target_id, strategy_settings, num_candidates=25):
     seq_args = {'SEQUENCE_ID': target_id, 'SEQUENCE_TEMPLATE': sequence}
     
     global_args = {
@@ -206,7 +237,7 @@ def design_primers_for_sequence(sequence, target_id, strategy_settings):
         'PRIMER_MIN_GC': 40.0,
         'PRIMER_MAX_GC': 60.0,
         'PRIMER_PRODUCT_SIZE_RANGE': [[150, 250]],
-        'PRIMER_NUM_RETURN': 20
+        'PRIMER_NUM_RETURN': num_candidates
     }
     
     global_args.update(strategy_settings)
@@ -287,20 +318,39 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         
     # Write Trimming FASTA (Universal Tail + Target Specific Primer)
     # This ignores the hairpin clamp as it is not present in the reads.
-    with open(trimming_fasta, 'w') as tf:
+    with open(trimming_fasta, 'w') as fastaf:
         for row in all_csv_rows:
-            target_id = row['target_id']
-            fwd_seq = row['fwd_primer_seq']
-            rev_seq = row['rev_primer_seq']
-            
-            # Universal Tail + Target Specific Primer
-            tf.write(f">{target_id}_F\n{FWD_P5_TRUNCATED}{fwd_seq}\n")
-            tf.write(f">{target_id}_R\n{REV_P7_TRUNCATED}{rev_seq}\n")
+            fwd_name = f"{row['target_id']}_F"
+            rev_name = f"{row['target_id']}_R"
+            fwd_seq_full = FWD_P5_TRUNCATED + row['fwd_primer_seq']
+            rev_seq_full = REV_P7_TRUNCATED + row['rev_primer_seq']
+            fastaf.write(f">{fwd_name}\n{fwd_seq_full}\n")
+            fastaf.write(f">{rev_name}\n{rev_seq_full}\n")
+
+    # (v8.0 Ready) Write Thermodynamic/Dimerization Report
+    dimer_report_file = f"{output_prefix}.dimers.txt"
+    with open(dimer_report_file, 'w') as dimf:
+        dimf.write(f"--- Dimerization & Thermodynamic Report for {output_prefix} ---\n")
+        dimf.write(f"Panel Size: {len(all_csv_rows)} amplicons\n\n")
+        
+        if final_warnings:
+            dimf.write("WARNINGS / RESIDUAL CLASHES:\n")
+            # Sort warnings by dG (worst first)
+            try:
+                sorted_warnings = sorted(list(set(final_warnings)), key=lambda x: x[1])
+                for msg, dg in sorted_warnings:
+                    dimf.write(f"  [{dg:.2f} kcal/mol] {msg}\n")
+            except:
+                for warning in final_warnings:
+                    dimf.write(f"  {warning}\n")
+        else:
+            dimf.write("Thermodynamic Success: No significant dimerization predicted (dG thresholds respected).\n")
 
     print(f"\nResults for {len(all_csv_rows)} specific targets saved to:")
     print(f"   - {csv_file}")
     print(f"   - {bed_file}")
     print(f"   - {trimming_fasta}")
+    print(f"   - {dimer_report_file}")
     
     log_file = f"{output_prefix}.log.txt"
     with open(log_file, 'w') as logf:
@@ -325,234 +375,223 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
             
     print(f"A detailed log of warnings has been saved to '{log_file}'")
 
-def process_single_target(target_id, genome_records, gene_coords, blast_db, force_multiprime, oligo_format, add_hairpin_clamp):
+def process_single_target(target_id, genome_records, gene_coords, blast_db, force_multiprime, oligo_format, add_hairpin_clamp, rescue=False, num_candidates=25):
     
-    target_sequence, target_info, error = extract_target_sequence(genome_records, gene_coords, target_id)
-    if not target_sequence:
-        return (target_id, [], error) 
-
-    all_specific_pairs_for_target = []
-    seq_len = len(target_sequence)
-
-    def find_valid_pairs(primer_results, strategy_name):
-        num_returned = primer_results.get('PRIMER_PAIR_NUM_RETURNED', 0)
-        if num_returned == 0:
-            return False 
-
-        found_at_least_one = False
-        for i in range(num_returned):
-            fwd_seq = primer_results[f'PRIMER_LEFT_{i}_SEQUENCE']
-            rev_seq = primer_results[f'PRIMER_RIGHT_{i}_SEQUENCE']
+    # We define the "ideal" size here to use for rescue calculations
+    ideal_min_product_size = 150 
+    
+    # Define window shifts for rescue mode
+    # Motif jump is ~primer size; Regional jump is 30% of target amplicon size
+    motif_jump = 25
+    regional_jump = int(ideal_min_product_size * 0.3)
+    shifts = [0, -motif_jump, motif_jump, -regional_jump, regional_jump] if rescue else [0]
+    
+    for shift in shifts:
+        if shift != 0:
+            print(f"  -> Rescue Attempt: Shifting window by {shift}bp for {target_id}...")
             
-            try:
-                fwd_hits, _, fwd_specific, fwd_warning = run_blast_specificity_check(fwd_seq, blast_db)
-                rev_hits, _, rev_specific, rev_warning = run_blast_specificity_check(rev_seq, blast_db)
-                if fwd_warning:
-                    print(f"  {fwd_warning}")
-                if rev_warning:
-                    print(f"  {rev_warning}")
-            except Exception as e:
-                print(f"Warning: BLAST check failed for {target_id} pair {i}: {e}. Skipping pair.")
-                continue 
+        target_sequence, target_info, error = extract_target_sequence(genome_records, gene_coords, target_id, offset_bp=shift)
+        if not target_sequence:
+            continue
 
-            specificity_ok = (fwd_specific and rev_specific)
-            
-            if not force_multiprime and not specificity_ok:
-                continue 
-            
-            fwd_self_dg = primer3.calc_end_stability(fwd_seq, fwd_seq).dg / 1000.0
-            rev_self_dg = primer3.calc_end_stability(rev_seq, rev_seq).dg / 1000.0
-            fwd_rev_dg1 = primer3.calc_end_stability(fwd_seq, rev_seq).dg / 1000.0
-            fwd_rev_dg2 = primer3.calc_end_stability(rev_seq, fwd_seq).dg / 1000.0
-            
-            worst_self_interaction_dg = min(fwd_self_dg, rev_self_dg, fwd_rev_dg1, fwd_rev_dg2)
+        all_specific_pairs_for_target = []
+        seq_len = len(target_sequence)
 
-            if worst_self_interaction_dg < END_STABILITY_DG_THRESHOLD:
-                continue 
+        def find_valid_pairs(primer_results, strategy_name, current_shift):
+            num_returned = primer_results.get('PRIMER_PAIR_NUM_RETURNED', 0)
+            if num_returned == 0:
+                return False 
 
-            found_at_least_one = True 
-            fwd_tm = primer_results[f'PRIMER_LEFT_{i}_TM']
-            rev_tm = primer_results[f'PRIMER_RIGHT_{i}_TM']
-            flags = []
-            
-            if oligo_format == 'fwd_tailed':
-                fwd_primer_tailed = FWD_P5_TRUNCATED + fwd_seq
-                rev_primer_tailed = REV_P7_TRUNCATED + rev_seq
+            found_at_least_one = False
+            for i in range(num_returned):
+                fwd_seq = primer_results[f'PRIMER_LEFT_{i}_SEQUENCE']
+                rev_seq = primer_results[f'PRIMER_RIGHT_{i}_SEQUENCE']
                 
-                if add_hairpin_clamp:
-                    flags.append("HairpinClamp")
-                    fwd_primer_tailed = add_iterative_hairpin_clamp(
-                        fwd_primer_tailed, fwd_seq, HAIRPIN_STEM_TARGET_DG, HAIRPIN_CLAMP_MAX_LEN
-                    )
-                    rev_primer_tailed = add_iterative_hairpin_clamp(
-                        rev_primer_tailed, rev_seq, HAIRPIN_STEM_TARGET_DG, HAIRPIN_CLAMP_MAX_LEN
-                    )
-            else:
-                fwd_rc = str(Seq(fwd_seq).reverse_complement())
-                rev_rc = str(Seq(rev_seq).reverse_complement())
-                fwd_primer_tailed = fwd_rc + FWD_RC_P5_TRUNCATED
-                rev_primer_tailed = rev_rc + REV_RC_P7_TRUNCATED
+                try:
+                    fwd_hits, _, fwd_specific, fwd_warning = run_blast_specificity_check(fwd_seq, blast_db)
+                    rev_hits, _, rev_specific, rev_warning = run_blast_specificity_check(rev_seq, blast_db)
+                except Exception as e:
+                    continue 
 
-            if fwd_tm < IDEAL_TM_MIN or rev_tm < IDEAL_TM_MIN:
-                flags.append("Low_Tm")
-            if fwd_tm > IDEAL_TM_MAX or rev_tm > IDEAL_TM_MAX:
-                flags.append("High_Tm")
-            
-            if force_multiprime and not specificity_ok:
-                flags.append(f"Multi_Hit_FWD:{fwd_hits}_REV:{rev_hits}")
-
-            pair_rank_str = f"{i} ({strategy_name})"
-
-            csv_row = {
-                'target_id': target_id, 'pair_rank': pair_rank_str, 
-                'flags': ";".join(flags) if flags else "OK", 
-                'fwd_primer_tailed': fwd_primer_tailed,
-                'rev_primer_tailed': rev_primer_tailed,
-                'fwd_primer_seq': fwd_seq, 'rev_primer_seq': rev_seq,
-                'fwd_primer_tm': f"{fwd_tm:.2f}",
-                'rev_primer_tm': f"{rev_tm:.2f}",
-                'amplicon_size': primer_results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE'],
-                'specificity_hits': f"F:{fwd_hits}, R:{rev_hits}"
-            }
-            
-            product_size = primer_results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE']
-            fwd_start_in_gene = primer_results[f'PRIMER_LEFT_{i}'][0]
-            amp_start = target_info['start'] - 1 + fwd_start_in_gene
-            amp_end = amp_start + product_size
-            bed_row = f"{target_info['contig']}\t{amp_start}\t{amp_end}\t{target_id}_amplicon_{pair_rank_str}\t0\t+\n"
-            
-            all_specific_pairs_for_target.append({'csv_row': csv_row, 'bed_row': bed_row})
-        
-        return found_at_least_one
-
-    try:
-        ideal_strategy_settings = {} 
-        ideal_min_product_size = 150 
-        
-        ideal_strategy_possible = (seq_len >= ideal_min_product_size)
-        
-        if ideal_strategy_possible:
-            primer_results = design_primers_for_sequence(target_sequence, target_id, ideal_strategy_settings)
-            find_valid_pairs(primer_results, "Strategy 0 (Ideal)")
-
-    except Exception as e:
-        return (target_id, [], f"Error processing {target_id} (Strategy 0): {e}")
-
-    if not all_specific_pairs_for_target:
-        fallback_strategies = [
-            {'name': 'Strategy 1 (Longer)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[250, 350]], 'PRIMER_MIN_TM': 57.0, 'PRIMER_MAX_TM': 63.0}},
-            {'name': 'Strategy 2 (Shorter)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[100, 150]], 'PRIMER_MIN_TM': 57.0, 'PRIMER_MAX_TM': 63.0}},
-            {'name': 'Strategy 3 (Relaxed Tm)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[150, 250]], 'PRIMER_MIN_TM': 55.0, 'PRIMER_MAX_TM': 65.0}},
-        ]
-
-        for strategy in fallback_strategies:
-            strategy_name = strategy['name']
-            strategy_settings = strategy['settings']
-            
-            product_range_list = strategy_settings.get('PRIMER_PRODUCT_SIZE_RANGE', [[150,250]])
-            min_product_size = product_range_list[0][0]
-            if seq_len < min_product_size:
-                continue 
-
-            try:
-                primer_results = design_primers_for_sequence(target_sequence, target_id, strategy_settings)
-                if find_valid_pairs(primer_results, strategy_name):
-                    break 
-            except Exception as e:
-                print(f"Warning: Strategy {strategy_name} for {target_id} failed: {e}")
-                continue 
-
-    if not all_specific_pairs_for_target:
-        return (target_id, [], f"Could not find a specific, non-hairpin primer pair for {target_id} after all strategies.")
-    
-    return (target_id, all_specific_pairs_for_target, None) 
-
-def find_compatible_set(target_to_primers_map, pool_name, max_iterations):
-    print(f"\n--- Starting Compatibility Check & Auto-Healing for {pool_name} ---")
-    
-    if len(target_to_primers_map) < 2:
-        print(f"Not enough targets in {pool_name} for a multiplex check. Using best primers.")
-        final_set = [primers[0] for primers in target_to_primers_map.values() if primers]
-        return final_set, []
-
-    current_indices = {target: 0 for target in target_to_primers_map}
-    best_set_indices = current_indices.copy()
-    min_clashes_found = float('inf')
-    best_clash_list = []
-    
-    for iteration in range(max_iterations):
-        current_primer_set = [] 
-        valid_set = True
-        
-        for target_id, index in current_indices.items():
-            if index >= len(target_to_primers_map[target_id]):
-                valid_set = False
-                break
-            
-            primer_data = target_to_primers_map[target_id][index]
-            csv_row = primer_data['csv_row']
-            fwd_name = f"{csv_row['target_id']}_F_{csv_row['pair_rank']}"
-            rev_name = f"{csv_row['target_id']}_R_{csv_row['pair_rank']}"
-            
-            current_primer_set.append((fwd_name, csv_row['fwd_primer_seq'], target_id))
-            current_primer_set.append((rev_name, csv_row['rev_primer_seq'], target_id))
-        
-        if not valid_set:
-            print(f"Stopping search for {pool_name} (ran out of alternatives).")
-            final_set = [target_to_primers_map[t][i] for t, i in best_set_indices.items() if i < len(target_to_primers_map[t])]
-            return final_set, best_clash_list
-
-        clashes = {} 
-        all_clashes = [] 
-
-        for (p1_name, p1_seq, p1_target), (p2_name, p2_seq, p2_target) in itertools.combinations(current_primer_set, 2):
-            if p1_target == p2_target:
-                continue
-            try:
-                dg1_on_2 = primer3.calc_end_stability(p1_seq, p2_seq).dg / 1000.0
-                dg2_on_1 = primer3.calc_end_stability(p2_seq, p1_seq).dg / 1000.0
-                dg_val = min(dg1_on_2, dg2_on_1)
+                specificity_ok = (fwd_specific and rev_specific)
+                if not force_multiprime and not specificity_ok:
+                    continue 
                 
-                if dg_val < END_STABILITY_DG_THRESHOLD:
-                    error_msg = (f"Potential 3' cross-dimer between {p1_name} and {p2_name} (dG: {dg_val:.2f})")
-                    all_clashes.append((error_msg, dg_val))
-                    clashes[p1_target] = clashes.get(p1_target, 0) + 1
-                    clashes[p2_target] = clashes.get(p2_target, 0) + 1
-            except Exception as e:
-                print(f"Warning: Could not calculate 3' end stability for {p1_name}/{p2_name}. Error: {e}")
+                # 1. Check self-dimerization (full length)
+                if get_homodimer_dg(fwd_seq) < MAX_SELF_DIMER_DG or get_homodimer_dg(rev_seq) < MAX_SELF_DIMER_DG:
+                    continue
 
-        num_clashes = len(all_clashes)
-        
-        if num_clashes < min_clashes_found:
-            min_clashes_found = num_clashes
-            best_set_indices = current_indices.copy()
-            best_clash_list = all_clashes 
+                # 2. Check internal heterodimer (full length between F and R)
+                if get_heterodimer_dg(fwd_seq, rev_seq) < MAX_HETERODIMER_DG:
+                    continue
 
-        if not clashes:
-            print(f"SUCCESS: Found a compatible set for {pool_name} in {iteration + 1} iterations.")
-            final_set = [target_to_primers_map[t][i] for t, i in current_indices.items()]
-            return final_set, []
-        
-        worst_target = max(clashes, key=clashes.get)
-        if pool_name == "Single_Pool": 
-            print(f"   -> {pool_name} Iteration {iteration+1}: Found {num_clashes} clashes. Worst offender: {worst_target} ({clashes[worst_target]} clashes).")
-        
-        current_indices[worst_target] += 1
-        
-    print(f"Failed to find a perfect set for {pool_name} after {max_iterations} iterations.")
-    
-    worst_dg = 0.0
-    if best_clash_list: 
+                # 3. Check 3' end stability (The "Extender" check)
+                dg_fwd_rev = get_end_stability_dg(fwd_seq, rev_seq)
+                dg_rev_fwd = get_end_stability_dg(rev_seq, fwd_seq)
+                if min(dg_fwd_rev, dg_rev_fwd) < END_STABILITY_DG_THRESHOLD:
+                    continue 
+
+                found_at_least_one = True 
+                fwd_tm = primer_results[f'PRIMER_LEFT_{i}_TM']
+                rev_tm = primer_results[f'PRIMER_RIGHT_{i}_TM']
+                flags = []
+                if current_shift != 0: flags.append(f"Rescued_{current_shift}bp")
+                
+                if oligo_format == 'fwd_tailed':
+                    fwd_primer_tailed = FWD_P5_TRUNCATED + fwd_seq
+                    rev_primer_tailed = REV_P7_TRUNCATED + rev_seq
+                    if add_hairpin_clamp:
+                        flags.append("HairpinClamp")
+                        fwd_primer_tailed = add_iterative_hairpin_clamp(fwd_primer_tailed, fwd_seq, HAIRPIN_STEM_TARGET_DG, HAIRPIN_CLAMP_MAX_LEN)
+                        rev_primer_tailed = add_iterative_hairpin_clamp(rev_primer_tailed, rev_seq, HAIRPIN_STEM_TARGET_DG, HAIRPIN_CLAMP_MAX_LEN)
+                else:
+                    fwd_rc = str(Seq(fwd_seq).reverse_complement())
+                    rev_rc = str(Seq(rev_seq).reverse_complement())
+                    fwd_primer_tailed = fwd_rc + FWD_RC_P5_TRUNCATED
+                    rev_primer_tailed = rev_rc + REV_RC_P7_TRUNCATED
+
+                pair_rank_str = f"{i} ({strategy_name})"
+                csv_row = {
+                    'target_id': target_id, 'pair_rank': pair_rank_str, 
+                    'flags': ";".join(flags) if flags else "OK", 
+                    'fwd_primer_tailed': fwd_primer_tailed, 'rev_primer_tailed': rev_primer_tailed,
+                    'fwd_primer_seq': fwd_seq, 'rev_primer_seq': rev_seq,
+                    'fwd_primer_tm': f"{fwd_tm:.2f}", 'rev_primer_tm': f"{rev_tm:.2f}",
+                    'amplicon_size': primer_results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE'],
+                    'specificity_hits': f"F:{fwd_hits}, R:{rev_hits}"
+                }
+                try:
+                    ideal_strategy_settings = {} 
+                    # ideal_min_product_size is now defined at the top of the function
+                    product_size = primer_results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE']
+                    fwd_start_in_slice = primer_results[f'PRIMER_LEFT_{i}'][0]
+                    amp_start = target_info['start'] - 1 + current_shift + fwd_start_in_slice
+                    amp_end = amp_start + product_size
+                    bed_row = f"{target_info['contig']}\t{amp_start}\t{amp_end}\t{target_id}_amplicon_{pair_rank_str}\t0\t+\n"
+                    all_specific_pairs_for_target.append({'csv_row': csv_row, 'bed_row': bed_row})
+                except Exception as e:
+                    print(f"Error processing primer pair {i} for {target_id}: {e}")
+                    continue
+            
+            return found_at_least_one
+
         try:
-            worst_dg = min(dg for msg, dg in best_clash_list)
-        except (ValueError, TypeError):
-            worst_dg = 0.0 
-            
-    if pool_name == "Single_Pool" or min_clashes_found > 0:
-        print(f"Returning best available set for {pool_name} with {min_clashes_found} potential clashes (worst 3' dG: {worst_dg:.2f} kcal/mol).")
+            primer_results = design_primers_for_sequence(target_sequence, target_id, {}, num_candidates=num_candidates)
+            find_valid_pairs(primer_results, "Strategy 0 (Ideal)", shift)
+        except: pass
+
+        if not all_specific_pairs_for_target:
+            fallback_strategies = [
+                {'name': 'Strategy 1 (Longer)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[250, 350]], 'PRIMER_MIN_TM': 57.0, 'PRIMER_MAX_TM': 63.0}},
+                {'name': 'Strategy 2 (Shorter)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[100, 150]], 'PRIMER_MIN_TM': 57.0, 'PRIMER_MAX_TM': 63.0}},
+                {'name': 'Strategy 3 (Relaxed Tm)', 'settings': {'PRIMER_PRODUCT_SIZE_RANGE': [[150, 250]], 'PRIMER_MIN_TM': 55.0, 'PRIMER_MAX_TM': 65.0}},
+            ]
+            for strategy in fallback_strategies:
+                try:
+                    primer_results = design_primers_for_sequence(target_sequence, target_id, strategy['settings'], num_candidates=num_candidates)
+                    if find_valid_pairs(primer_results, strategy['name'], shift): break
+                except: continue
+
+        if all_specific_pairs_for_target:
+            return (target_id, all_specific_pairs_for_target, None)
+
+    return (target_id, [], f"Could not find a specific primer pair for {target_id} even after rescue shifts.")
+
+def is_compatible(candidate_pair, existing_pool_data, check_overlap):
+    """Checks if a candidate pair is compatible with all primers and amplicons in the pool."""
+    c_fwd = candidate_pair['csv_row']['fwd_primer_seq']
+    c_rev = candidate_pair['csv_row']['rev_primer_seq']
+    
+    # 1. Internal checks for the candidate itself
+    if min(get_homodimer_dg(c_fwd), get_homodimer_dg(c_rev)) < MAX_SELF_DIMER_DG:
+        return False, "Self-dimer"
+    if get_heterodimer_dg(c_fwd, c_rev) < MAX_HETERODIMER_DG:
+        return False, "Internal FR-dimer"
+    
+    # 2. Genomic Overlap Check (Crucial for Tiled Designs)
+    if check_overlap:
+        c_bed = candidate_pair['bed_row'].split('\t')
+        c_contig, c_start, c_end = c_bed[0], int(c_bed[1]), int(c_bed[2])
+        for p_data in existing_pool_data:
+            p_bed = p_data['bed_row'].split('\t')
+            p_contig, p_start, p_end = p_bed[0], int(p_bed[1]), int(p_bed[2])
+            if c_contig == p_contig:
+                # Standard overlap check: (StartA < EndB) and (EndA > StartB)
+                if c_start < p_end and c_end > p_start:
+                    return False, "Genomic overlap"
+
+    # 3. Cross-thermodynamic checks against the pool
+    for p_data in existing_pool_data:
+        p_seqs = [p_data['csv_row']['fwd_primer_seq'], p_data['csv_row']['rev_primer_seq']]
+        for p_seq in p_seqs:
+            for c_seq in [c_fwd, c_rev]:
+                # 3' End Stability (Bi-directional)
+                if get_end_stability_dg(c_seq, p_seq) < END_STABILITY_DG_THRESHOLD or \
+                   get_end_stability_dg(p_seq, c_seq) < END_STABILITY_DG_THRESHOLD:
+                    return False, "3' End Dimer"
+                
+                # Full Heterodimer
+                if get_heterodimer_dg(c_seq, p_seq) < MAX_HETERODIMER_DG:
+                    return False, "Internal Heterodimer"
+                
+    return True, None
+
+def pack_targets_first_fit(target_to_primers_map, overlap_detected, monte_carlo_iterations=20):
+    """
+    (v8.5 Ready) Monte Carlo Packing Engine.
+    Runs First-Fit multiple times with randomized target orderings to find the global minimum.
+    """
+    import random
+    
+    def get_target_coords(tid):
+        bed = target_to_primers_map[tid][0]['bed_row'].split('\t')
+        return (bed[0], int(bed[1]))
+
+    all_tids = list(target_to_primers_map.keys())
+    best_pools = None
+    min_pool_count = float('inf')
+
+    print(f"\n--- Packing {len(all_tids)} targets (Monte Carlo Iterations: {monte_carlo_iterations}) ---")
+    
+    for i in range(monte_carlo_iterations):
+        # On iteration 0, use genomic order (best heuristic). Subsequent iterations use random.
+        current_shuffled_tids = sorted(all_tids, key=get_target_coords) if i == 0 else random.sample(all_tids, len(all_tids))
         
-    final_set = [target_to_primers_map[t][i] for t, i in best_set_indices.items() if i < len(target_to_primers_map[t])]
-    return final_set, best_clash_list 
+        current_pools = [] # List of lists of primer_data
+        
+        for tid in current_shuffled_tids:
+            candidates = target_to_primers_map[tid]
+            placed = False
+            
+            # Optimization: Try existing pools
+            for pool_set in current_pools:
+                for rank_idx, cand in enumerate(candidates):
+                    compatible, _ = is_compatible(cand, pool_set, overlap_detected)
+                    if compatible:
+                        # (v8.6 Ready) Track the rank actually used in the packing result
+                        cand_with_rank = cand.copy()
+                        cand_with_rank['rank_used'] = rank_idx
+                        pool_set.append(cand_with_rank)
+                        placed = True
+                        break
+                if placed: break
+            
+            if not placed:
+                # New pool
+                best_cand = candidates[0].copy()
+                best_cand['rank_used'] = 0
+                current_pools.append([best_cand])
+        
+        if len(current_pools) < min_pool_count:
+            min_pool_count = len(current_pools)
+            best_pools = [p[:] for p in current_pools]
+            if min_pool_count <= (2 if overlap_detected else 1): 
+                break # Found the theoretical minimum
+            
+        if i % 5 == 0 and i > 0:
+            print(f"   -> Iter {i}: Min pools found so far: {min_pool_count}")
+
+    return best_pools
 
 def check_amplicon_overlap(best_primer_pairs):
     amplicons_by_contig = {}
@@ -604,7 +643,9 @@ def run_design_mode(args):
                                blast_db=args.blast_db,
                                force_multiprime=args.force_multiprime,
                                oligo_format=args.oligo_format, 
-                               add_hairpin_clamp=args.add_hairpin_clamp) 
+                               add_hairpin_clamp=args.add_hairpin_clamp,
+                               rescue=args.rescue,
+                               num_candidates=args.num_candidates) 
 
         num_workers = os.cpu_count()
         print(f"Starting parallel processing with {num_workers} workers for {len(target_ids)} targets...")
@@ -648,68 +689,30 @@ def run_design_mode(args):
                 run_minimum_pool_logic = True
         
         if run_minimum_pool_logic:
-            print("\nDesign Strategy: Searching for the minimum number of compatible pools...")
+            # (v8.5 Ready) Pass monte_carlo_iterations and force_sparse
+            check_overlap = overlap_detected or args.force_sparse
+            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters)
             
-            # (v8.0 Ready) Iterate over keys, not original list
-            successful_targets = sorted(list(target_to_primers_map.keys()))
-            for num_pools in range(1, len(successful_targets) + 1):
-                print(f"\n--- Testing N = {num_pools} {'pool' if num_pools == 1 else 'pools'} ---")
-                
-                pools = [{} for _ in range(num_pools)]
-                for i, target_id in enumerate(successful_targets):
-                    pool_index = i % num_pools
-                    pools[pool_index][target_id] = target_to_primers_map[target_id]
-                
-                print(f"Splitting into {num_pools} pools with {[len(p) for p in pools]} targets each.")
-
-                all_pools_succeeded = True
-                all_pools_data = [] 
-                
-                for i, pool_targets in enumerate(pools):
-                    pool_name = f"pool_{i+1}"
-                    if not pool_targets:
-                        continue
-                    
-                    pool_set, pool_clash_data = find_compatible_set(pool_targets, pool_name, max_iterations=args.max_compatibility_iterations) 
-                    
-                    if pool_clash_data: 
-                        all_pools_succeeded = False
-                        worst_dg = 0.0
-                        try:
-                            worst_dg = min(dg for msg, dg in pool_clash_data)
-                        except (ValueError, TypeError): pass
-                        print(f"Failed to find a perfect 0-clash set for {pool_name} (found {len(pool_clash_data)} clashes, worst 3' dG: {worst_dg:.2f} kcal/mol).")
-                        print("Trying with N+1 pools...")
-                        break 
-                    
-                    all_pools_data.append((pool_set, pool_clash_data, pool_name))
-                
-                if all_pools_succeeded:
-                    print(f"\nSUCCESS: Found a perfect solution with {num_pools} pools.")
-                    for pool_set, pool_clash_data, pool_name in all_pools_data:
-                        pool_csv = [row['csv_row'] for row in pool_set]
-                        pool_bed = [row['bed_row'] for row in pool_set]
-                        write_design_output_files(pool_csv, pool_bed, f"{args.output_prefix}_{pool_name}", pool_clash_data, failed_targets_initial if pool_name == "pool_1" else [])
-                    break 
+            print(f"\nSUCCESS: Compressed {len(target_to_primers_map)} targets into {len(final_pools)} pools.")
             
-            if not all_pools_succeeded:
-                  print("\nFATAL: Could not find a perfect N-pool solution, even with N=len(targets).")
+            # (v8.6 Ready) Report candidate usage statistics
+            all_ranks = [p['rank_used'] for pool in final_pools for p in pool]
+            avg_rank = sum(all_ranks) / len(all_ranks)
+            max_rank = max(all_ranks)
+            print(f"Candidate usage: Avg Rank={avg_rank:.1f}, Max Rank={max_rank}")
 
+            for i, pool_set in enumerate(final_pools):
+                pool_name = i+1 if isinstance(i, int) else i # Safety
+                pool_csv = [row['csv_row'] for row in pool_set]
+                pool_bed = [row['bed_row'] for row in pool_set]
+                write_design_output_files(pool_csv, pool_bed, f"{args.output_prefix}_pool_{pool_name}", [], failed_targets_initial if i == 0 else [])
+        
         else:
-            print("\nDesign Strategy: Attempting to find a single compatible pool (forced)...")
-            final_compatible_set, final_clash_data = find_compatible_set(target_to_primers_map, "Single_Pool", max_iterations=args.max_compatibility_iterations)
-            
-            if len(final_clash_data) > MAX_CLASH_RECOMMENDATION:
-                print("\n--- RECOMMENDATION ---")
-                print(f"Warning: Best set found has {len(final_clash_data)} clashes (threshold is {MAX_CLASH_RECOMMENDATION}).")
-                print("This panel is at high risk of failure.")
-                
-            if final_compatible_set:
-                final_csv_rows = [row['csv_row'] for row in final_compatible_set]
-                final_bed_rows = [row['bed_row'] for row in final_compatible_set]
-                write_design_output_files(final_csv_rows, final_bed_rows, args.output_prefix, final_clash_data, failed_targets_initial)
-            else:
-                print("\nCould not determine a final compatible set. No files will be written.")
+            # Forced single pool - simplified
+            check_overlap = overlap_detected or args.force_sparse
+            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters)
+            pool_set = final_pools[0]
+            write_design_output_files([r['csv_row'] for r in pool_set], [r['bed_row'] for r in pool_set], args.output_prefix, [], failed_targets_initial)
 
         if failed_targets_initial:
             print("\n--- Targets That Failed Initial Design (All Pools) ---")
@@ -860,8 +863,8 @@ def run_feedback_mode(args):
         design_args = argparse.Namespace(**vars(args))
         design_args.target_file = temp_target_file
         design_args.output_prefix = f"{args.output_prefix}_v8_redesign"
-        # Force a bit more thoroughness/relaxation if needed? 
-        # For now, let's just stick to the standard design process but labeled as redesign.
+        # Enable rescue mode automatically for redesign if requested or default to True for redesign
+        design_args.rescue = True 
         run_design_mode(design_args)
         
         print(f"\nFeedback loop processed. Redesigned primers are in '{design_args.output_prefix}*'")
@@ -874,14 +877,25 @@ def main():
     parser = argparse.ArgumentParser(description="Design specific, adapter-tailed primers for multiple targets.")
     
     design_group = parser.add_argument_group('Mode 1: Full Design Pipeline')
-    design_group.add_argument('--genome', default='../common_refs/ecoli_genome.fna', help="Path to the reference genome (default: ../common_refs/ecoli_genome.fna).")
-    design_group.add_argument('--gff', default='../common_refs/genomic.gff', help="Path to a GFF file (default: ../common_refs/genomic.gff).")
+    design_group.add_argument('--genome', default='common_refs/ecoli_genome.fna', help="Path to the reference genome (default: common_refs/ecoli_genome.fna).")
+    design_group.add_argument('--gff', default='common_refs/genomic.gff', help="Path to a GFF file (default: common_refs/genomic.gff).")
     design_group.add_argument('--target-file', help="Path to a text file with one target gene ID per line.")
-    design_group.add_argument('--blast-db', default='../ncbi_data/ecoli_db', help="Prefix for the local BLAST database (default: ../ncbi_data/ecoli_db).")
+    design_group.add_argument('--blast-db', default='ncbi_data/ecoli_db', help="Prefix for the local BLAST database (default: ncbi_data/ecoli_db).")
     design_group.add_argument('--force-single-pool', action='store_true',
                               help="Force the script to find the 'best-available' single pool (default: finds minimum N-pools).")
+    design_group.add_argument('--force-sparse', action='store_true',
+                              help="Enforce zero genomic overlaps even if design is naturally sparse. Ensures a single-tube solution is 'clean'.")
+    design_group.add_argument('--monte-carlo-iters', type=int, default=20,
+                              help="Number of randomized packing iterations to find the global minimum (default: 20).")
     design_group.add_argument('--force-multiprime', action='store_true',
                               help="Allows primers that hit multiple identical locations in the genome. Useful for multi-copy genes like 16S rRNA. (Default: strict single-hit specificity).")
+    
+    # (v8.0 Ready) Phase 2 Pool Compression Group
+    pool_group = parser.add_argument_group('Pool Compression Optimizations')
+    pool_group.add_argument('--num-candidates', type=int, default=25, help='Number of primer pairs to design per target (default: 25)')
+    pool_group.add_argument('--max-heterodimer-dg', type=float, default=-8.0, help='Max heterodimer dG threshold (default: -8.0)')
+    pool_group.add_argument('--max-self-dimer-dg', type=float, default=-9.0, help='Max self-dimer dG threshold (default: -9.0)')
+    pool_group.add_argument('--max-end-stability-dg', type=float, default=-9.0, help="Max 3' end stability dG (default: -9.0)")
     
     # (v8.0 Ready) argparse default now comes from the top-level constant
     design_group.add_argument('--max-compatibility-iterations', type=int, default=MAX_COMPATIBILITY_ITERATIONS,
@@ -895,6 +909,7 @@ def main():
 
     feedback_group = parser.add_argument_group('Mode 3: v8.0 Feedback Loop')
     feedback_group.add_argument('--feedback', help="Path to primer_balancing_feedback.json from analysis pipeline.")
+    feedback_group.add_argument('--rescue', action='store_true', help="Automated Primer Rescue: Attempt to shift target window if original design fails/has zero coverage.")
     
     tail_group = parser.add_argument_group('Mode 2: Tail-Only Utility')
     tail_group.add_argument('--tail-fwd-file', help="Path to a text file with one forward primer per line.")
@@ -903,6 +918,12 @@ def main():
     parser.add_argument('--output-prefix', default='output/final_primers', help="Prefix for output files (default: output/final_primers).")
     
     args = parser.parse_args()
+
+    # --- (v8.0 Ready) Globalization of Constants from Arguments ---
+    global MAX_HETERODIMER_DG, MAX_SELF_DIMER_DG, END_STABILITY_DG_THRESHOLD
+    MAX_HETERODIMER_DG = args.max_heterodimer_dg
+    MAX_SELF_DIMER_DG = args.max_self_dimer_dg
+    END_STABILITY_DG_THRESHOLD = args.max_end_stability_dg
 
     if args.add_hairpin_clamp and args.oligo_format != 'fwd_tailed':
         parser.error("--add-hairpin-clamp can only be used with --oligo-format fwd_tailed.")
