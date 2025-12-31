@@ -96,11 +96,15 @@ python design/design.py \
 *   **Key Argument**: `--num-candidates 50` increases the search space for compatibility.
 *   **Key Argument**: `--force-sparse` ensures zero genomic overlaps between amplicons in the same pool.
 
-### 🧬 Advanced Multiplexing & Pool Minimization
-The v8.6 engine focuses on extreme thermodynamic safety and pool reduction.
-*   **Thermodynamic Thresholds**: Enforces heterodimer $dG > -8.0$, self-dimer $dG > -9.0$, and bi-directional 3' stability checks.
-*   **Monte Carlo Packing**: Use `--monte-carlo-iters 100` to run exhaustive randomized packing passes to find the absolute minimum number of pools.
-*   **Candidate Search Depth**: Use `--num-candidates 100` for high-plex panels (e.g., 100-plex) to maximize the "jigsaw" fit in a single tube.
+### 🧬 v10.0: Software-Defined Panel (KAPA HiFi Calibrated)
+The v10 engine is optimized for high-fidelity production, specifically calibrated for **Roche KAPA HiFi HotStart ReadyMix**.
+
+*   **Biophysical Calibration**: Hardcoded for 2.5mM $Mg^{++}$ and 1.2mM dNTPs to ensure safety in high-salt environments.
+*   **Production Thresholds**: Enforces a strict **-6.0 kcal/mol** 3' end stability floor (v10.0 standard).
+*   **Ultrapool Optimization**: Achieve high-plex density (e.g., **100-plex in 2 tubes**) using:
+    *   `--num-candidates 100`: Maximizes the "jigsaw" search space.
+    *   `--monte-carlo-iters 500`: Exaustive packing for minimum tube count.
+*   **High Performance**: Uncapped compatibility caching for 3x faster processing during complex packing runs.
 
 ---
 

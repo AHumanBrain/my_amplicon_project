@@ -33,7 +33,7 @@ FWD_RC_P5_TRUNCATED = 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
 REV_RC_P7_TRUNCATED = 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC'
 
 # --- Design Constants ---
-END_STABILITY_DG_THRESHOLD = -5.0 # (v8.7) Industry standard for dimer extension prevention
+END_STABILITY_DG_THRESHOLD = -6.0 # (v10.0 Stricter) Calibrated for KAPA HiFi Processivity
 IDEAL_TM_MIN = 59.0
 IDEAL_TM_MAX = 61.0
 # (v8.0 Ready) Created a single source of truth for min primer size
@@ -235,7 +235,14 @@ def design_primers_for_sequence(sequence, target_id, strategy_settings, num_cand
         'PRIMER_MIN_GC': 40.0,
         'PRIMER_MAX_GC': 60.0,
         'PRIMER_PRODUCT_SIZE_RANGE': [[150, 250]],
-        'PRIMER_NUM_RETURN': num_candidates
+        'PRIMER_NUM_RETURN': num_candidates,
+        # --- (v10.0) KAPA HiFi Salt Calibration ---
+        # Roche KAPA HiFi uses a high-salt buffer (2.5mM MgCl2 @ 1X).
+        # We must calibrate Primer3 to this "strict" environment to avoid underestimating dimer stability.
+        # dNTPs are 0.3mM each = 1.2mM total.
+        'PRIMER_SALT_DIVALENT': 2.5,
+        'PRIMER_DNTP_CONC': 1.2,
+        'PRIMER_SALT_CORRECTIONS': 1, # Use SantaLucia 1998 (Best for Mg++)
     }
     
     global_args.update(strategy_settings)
@@ -495,7 +502,7 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
 
     return (target_id, [], f"Could not find a specific primer pair for {target_id} even after rescue shifts.")
 
-@lru_cache(maxsize=50000)
+@lru_cache(maxsize=None)
 def check_primer_pair_compatibility(seq1, seq2, threshold_3p, threshold_full):
     """
     (v8.7) Cached check for two specific primer sequences.
@@ -910,7 +917,7 @@ def main():
     pool_group.add_argument('--num-candidates', type=int, default=25, help='Number of primer pairs to design per target (default: 25)')
     pool_group.add_argument('--max-heterodimer-dg', type=float, default=-8.0, help='Max heterodimer dG threshold (default: -8.0)')
     pool_group.add_argument('--max-self-dimer-dg', type=float, default=-9.0, help='Max self-dimer dG threshold (default: -9.0)')
-    pool_group.add_argument('--max-end-stability-dg', type=float, default=-9.0, help="Max 3' end stability dG (default: -9.0)")
+    pool_group.add_argument('--max-end-stability-dg', type=float, default=-6.0, help="Max 3' end stability dG (default: -6.0)")
     
     # (v8.0 Ready) argparse default now comes from the top-level constant
     design_group.add_argument('--max-compatibility-iterations', type=int, default=MAX_COMPATIBILITY_ITERATIONS,
