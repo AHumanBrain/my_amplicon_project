@@ -20,13 +20,12 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install design dependencies
+      - name: Install dependencies
         run: |
-          pip install -r design/requirements.txt
+          pip install biopython primer3-py tqdm pandas matplotlib pytest
       
       - name: Run unit tests
         run: |
-          cd design
           pytest test_design.py -v --tb=short
 
   test-pipeline:
@@ -41,7 +40,7 @@ jobs:
       - name: Set up Micromamba
         uses: mamba-org/setup-micromamba@v1
         with:
-          environment-file: analysis/environment.yml
+          environment-file: environment.yml
           environment-name: amplicon_pipeline
           cache-environment: true
       
@@ -80,7 +79,7 @@ jobs:
         run: |
           micromamba activate amplicon_pipeline
           cd analysis
-          nextflow run main.nf -profile conda --outdir ../results -preview
+          nextflow run main.nf --outdir ../results -preview
       
       - name: Verify workflow structure
         run: |
