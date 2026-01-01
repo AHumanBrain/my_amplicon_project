@@ -310,6 +310,7 @@ process PLOT_COVERAGE {
     output:
     path "${sample_id}_coverage_report.html", emit: html
     path "${sample_id}_balancing_feedback.json", emit: json
+    path "${sample_id}_uniformity.png", emit: png
 
     script:
     """
@@ -318,6 +319,12 @@ process PLOT_COVERAGE {
     -c $target_coverage \
     -o ${sample_id}_coverage_report.html \
     -j ${sample_id}_balancing_feedback.json
+
+    python ${projectDir}/plot_uniformity.py \
+    -m $pcr_metrics \
+    -c $target_coverage \
+    -o ${sample_id}_uniformity.png \
+    -s "${sample_id}"
     """
 }
 
@@ -392,6 +399,7 @@ workflow {
         .mix(TRIM_PRIMERS.out.log)
         .mix(PICARD_METRICS.out.all_metrics)
         .mix(PLOT_COVERAGE.out.html)
+        .mix(PLOT_COVERAGE.out.png)
         .mix(MARK_DUPLICATES.out.metrics)
         .collect()
         .set { multiqc_inputs }

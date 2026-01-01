@@ -15,3 +15,5 @@ dependencies:
   - deeptools
   - multiqc
   - openjdk=17
+  - pandas
+  - matplotlib
