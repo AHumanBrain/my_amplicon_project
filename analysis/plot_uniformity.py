@@ -2,47 +2,30 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
-import os
+import logging
 from pathlib import Path
 
-def parse_pcr_metrics(metrics_file):
-    """Extract MEAN_TARGET_COVERAGE from Picard PCR metrics."""
-    mean_coverage = 0
-    try:
-        with open(metrics_file, 'r') as f:
-            lines = f.readlines()
-            for i, line in enumerate(lines):
-                if line.strip().startswith('CUSTOM_AMPLICON_SET'):
-                    headers = lines[i].strip().split('\t')
-                    values = lines[i+1].strip().split('\t')
-                    metrics = dict(zip(headers, values))
-                    mean_coverage = float(metrics.get('MEAN_TARGET_COVERAGE', 0))
-                    break
-    except Exception as e:
-        print(f"Error parsing PCR metrics: {e}")
-    return mean_coverage
+# --- Modular Imports ---
+from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
 
-def parse_target_coverage(coverage_file):
-    """Parse Picard per-target coverage file into a DataFrame."""
-    try:
-        df = pd.read_csv(coverage_file, sep='\t')
-        return df
-    except Exception as e:
-        print(f"Error parsing target coverage: {e}")
-        return None
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 def plot_uniformity(pcr_metrics_path, target_cov_path, output_path, sample_name):
     """Replicate Paragon Genomics uniformity plot style."""
     
-    global_mean = parse_pcr_metrics(pcr_metrics_path)
-    df = parse_target_coverage(target_cov_path)
+    # Use modular utilities
+    metrics_dict = parse_picard_pcr_metrics(pcr_metrics_path)
+    global_mean = float(metrics_dict.get('MEAN_TARGET_COVERAGE', 0))
+    targets_list = parse_per_target_coverage(target_cov_path)
     
-    if df is None or global_mean == 0:
-        print("Required data missing. Aborting plot.")
+    if not targets_list or global_mean == 0:
+        logging.error("Required data missing. Aborting plot.")
         return
 
-    # Calculate Relative Coverage
-    df['rel_mean'] = df['mean_coverage'] / global_mean
+    # Convert to DataFrame for easier plotting
+    df = pd.DataFrame(targets_list)
+    df = pd.DataFrame(calculate_relative_coverage(targets_list, global_mean))
     
     # Calculate Uniformity Metric: % of amplicons > 0.2x mean
     uniformity_02 = (df['rel_mean'] > 0.2).sum() / len(df) * 100

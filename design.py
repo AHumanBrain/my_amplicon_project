@@ -1,121 +1,53 @@
 import argparse
-from Bio import SeqIO
 import json
-from Bio.SeqRecord import SeqRecord
-from Bio.Seq import Seq # Added for reverse complement
-import primer3
 import os
-import csv
 import subprocess
 import shutil
 import multiprocessing
 import itertools
+import logging
 from functools import partial, lru_cache
 from tqdm import tqdm
-import re # Import re for parsing
+from Bio import SeqIO
+from Bio.Seq import Seq
+import re
 
-# --- (v7.7) Refactored Hardcoded Adapter Tails ---
-# Tails are the full length from index to insert
-#FWD_P5_TRUNCATED = 'ACACTCTTTCCCTACACGACGCTCTTCCGATCT' 33-mer
-#REV_P7_TRUNCATED = 'GTGACTGGAGTTCAGACGTGTGCTCTTCCGATCT' 34-mer
+# --- Modular Imports ---
+from core.biophysics import BioConfig, get_heterodimer_dg, get_end_stability_dg, get_homodimer_dg, add_hairpin_clamp
+from core.adapters import Adapters, format_primer
+from core.io_utils import parse_bed, parse_target_list, write_csv_recipe
 
-# --- (v8.0 Ready) Refactored Hardcoded Adapter Tails ---
-# Tails shortened to 20bp to keep final oligo length < 60nt
-# This allows for standard desalting without loss of the 5' clamp.
+# --- Logging Configuration ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("design_production.log"),
+        logging.StreamHandler()
+    ]
+)
 
-# For 'fwd_tailed' (synthesis-ready) format
-FWD_P5_TRUNCATED = 'ACACGACGCTCTTCCGATCT' #20-mer; shaved off the 5'-most 13 bases
-REV_P7_TRUNCATED = 'GACGTGTGCTCTTCCGATCT' #20-mer; shaved off the 5' most 14 bases
-
-# For 'rc_tailed' (template-generation) format
-# These remain long as they are not for direct synthesis.
-FWD_RC_P5_TRUNCATED = 'AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT'
-REV_RC_P7_TRUNCATED = 'AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC'
-
-# --- Design Constants ---
-END_STABILITY_DG_THRESHOLD = -6.0 # (v10.0 Stricter) Calibrated for KAPA HiFi Processivity
-IDEAL_TM_MIN = 59.0
-IDEAL_TM_MAX = 61.0
-# (v8.0 Ready) Created a single source of truth for min primer size
+# --- Legacy Constants (Mpped to BioConfig) ---
+END_STABILITY_DG_THRESHOLD = BioConfig.END_STABILITY_DG_THRESHOLD
+IDEAL_TM_MIN = BioConfig.IDEAL_TM_MIN
+IDEAL_TM_MAX = BioConfig.IDEAL_TM_MAX
 IDEAL_PRIMER_MIN_SIZE = 19 
-
-# --- (v8.0 Ready) Phase 2 Thermodynamic Thresholds ---
-# Lower (more negative) means stronger/worse dimerization
-MAX_HETERODIMER_DG = -8.0  # (kcal/mol) Stop heterodimers at internal secondary structures
-MAX_SELF_DIMER_DG = -9.0   # (kcal/mol) Stop primers folding back on themselves
+MAX_HETERODIMER_DG = BioConfig.MAX_HETERODIMER_DG
+MAX_SELF_DIMER_DG = BioConfig.MAX_SELF_DIMER_DG
 
 # --- Large-Panel Logic ---
 MAX_CLASH_RECOMMENDATION = 5
-# (v8.0 Ready) Set the default for iterations to 5000
 MAX_COMPATIBILITY_ITERATIONS = 5000
-
-# --- (v8.0 Ready) Constants for Hairpin Clamp Logic ---
-# Calibrated based on v7.5.1 results.
-HAIRPIN_STEM_TARGET_DG = -11.9 # (kcal/mol) Calibrated target dG for the *stem* interaction
-HAIRPIN_CLAMP_MAX_LEN = IDEAL_PRIMER_MIN_SIZE  # (v8.0 Ready) Linked to min primer size
 
 # --- Core Helper Functions ---
 
 def read_lines_from_file(file_path):
-    """Reads a list of items from a file, one per line, skipping empty lines."""
-    with open(file_path, 'r') as f:
-        return [line.strip() for line in f if line.strip()]
+    """Wrapper for core.io_utils.parse_target_list."""
+    return parse_target_list(file_path)
 
-# --- (v7.8) Corrected Helper Function for Hairpin Clamps ---
-
-# --- (v8.0 Ready) Phase 2 Cached Thermodynamic Functions ---
-@lru_cache(maxsize=10000)
-def get_heterodimer_dg(seq1, seq2):
-    """Calculates worst-case dG across the entire sequence length."""
-    try:
-        return primer3.calc_heterodimer(seq1, seq2).dg / 1000.0
-    except:
-        return 0.0
-
-@lru_cache(maxsize=10000)
-def get_end_stability_dg(seq1, seq2):
-    """Calculates stability of the 3' end interaction."""
-    try:
-        return primer3.calc_end_stability(seq1, seq2).dg / 1000.0
-    except:
-        return 0.0
-
-@lru_cache(maxsize=10000)
-def get_homodimer_dg(seq):
-    """Calculates stability of a primer folding back on itself."""
-    try:
-        return primer3.calc_homodimer(seq).dg / 1000.0
-    except:
-        return 0.0
-
+# (Legacy add_iterative_hairpin_clamp kept for backward compatibility but calls core.biophysics)
 def add_iterative_hairpin_clamp(oligo_sequence, primer_specific_seq, target_stem_dg, max_clamp_len):
-    """
-    (v7.8) Iteratively adds clamp bases to the 5' end.
-    Uses calc_heterodimer to model the stem interaction, aiming for the
-    calibrated HAIRPIN_STEM_TARGET_DG.
-    """
-    try:
-        primer_specific_seq_rc = str(Seq(primer_specific_seq).reverse_complement())
-        
-        best_oligo = oligo_sequence
-        best_stem_dg = 0.0 # dG for 0-length clamp
-
-        for i in range(1, min(max_clamp_len, len(primer_specific_seq_rc)) + 1):
-            clamp_seq = primer_specific_seq_rc[:i]
-            # (v8.7) Use cached heterodimer function
-            stem_dg = get_heterodimer_dg(clamp_seq, primer_specific_seq)
-
-            if abs(stem_dg - target_stem_dg) < abs(best_stem_dg - target_stem_dg):
-                best_oligo = clamp_seq + oligo_sequence
-                best_stem_dg = stem_dg
-            elif stem_dg < best_stem_dg: 
-                break
-            
-        return best_oligo
-    
-    except Exception as e:
-        print(f"Warning: Could not add hairpin clamp to {oligo_sequence[:20]}... Error: {e}")
-        return oligo_sequence 
+    return add_hairpin_clamp(oligo_sequence, primer_specific_seq, target_stem_dg, max_clamp_len)
 
 # --- Mode 1: Design Pipeline Functions ---
 
@@ -262,7 +194,8 @@ def run_blast_specificity_check(primer_seq, blast_db_path, strict_threshold=1):
     """
     command = [
         'blastn', '-query', '-', '-db', blast_db_path, '-task', 'blastn-short',
-        '-outfmt', '6 sseqid sstart send', '-perc_identity', '100', '-qcov_hsp_perc', '100'
+        '-outfmt', '6 sseqid sstart send', '-perc_identity', '100', '-qcov_hsp_perc', '100',
+        '-num_threads', '4'
     ]
     try:
         process = subprocess.run(command, input=f">primer\n{primer_seq}", capture_output=True, text=True, check=True)
@@ -299,6 +232,7 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
     output_dir = os.path.dirname(output_prefix)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
+        logging.info(f"Created output directory: {output_dir}")
 
     csv_file, bed_file = f"{output_prefix}.csv", f"{output_prefix}.bed"
     trimming_fasta = f"{output_prefix}_trimming.fasta"
@@ -351,11 +285,7 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         else:
             dimf.write("Thermodynamic Success: No significant dimerization predicted (dG thresholds respected).\n")
 
-    print(f"\nResults for {len(all_csv_rows)} specific targets saved to:")
-    print(f"   - {csv_file}")
-    print(f"   - {bed_file}")
-    print(f"   - {trimming_fasta}")
-    print(f"   - {dimer_report_file}")
+    logging.info(f"Results for {len(all_csv_rows)} specific targets saved to: {output_prefix}.csv/.bed/.fasta/.dimers.txt")
     
     log_file = f"{output_prefix}.log.txt"
     with open(log_file, 'w') as logf:
@@ -378,7 +308,7 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         if not final_warnings and not failed_targets_initial:
             logf.write("Design complete. All targets were successful and compatible.\n")
             
-    print(f"A detailed log of warnings has been saved to '{log_file}'")
+    logging.info(f"A detailed log of warnings has been saved to '{log_file}'")
 
 def process_single_target(target_id, genome_records, gene_coords, blast_db, force_multiprime, oligo_format, add_hairpin_clamp, rescue=False, num_candidates=25):
     

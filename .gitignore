@@ -24,6 +24,17 @@ __pycache__/
 # Design Outputs (Ignore transient results)
 design/output/*
 !design/output/.gitkeep
+design/*.bed
+design/*.csv
+design/*.fasta
+design/*.txt
+design/ncbi_data/*
+!design/ncbi_data/.gitkeep
+
+# Logs
+*.log
+*.log.*
+design_production.log
 
 # OS
 .DS_Store

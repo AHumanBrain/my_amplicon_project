@@ -1,4 +1,0 @@
-biopython
-primer3-py
-tqdm
-pytest

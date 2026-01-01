@@ -55,38 +55,40 @@ flowchart TD
 
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Installation & Setup (Docker-First)
 
-### Windows (WSL / Ubuntu)
-This is the recommended environment for the full analysis pipeline.
-1.  **Run the Setup Script**:
+The project is designed to run in a **fully containerized environment**. This ensures that the complex bioinformatics stack (BWA, GATK, Nextflow, Primer3) is perfectly reproducible and isolated from your host system.
+
+### 🐳 The Primary Workflow (Recommended)
+This method is standard for production runs and complex analysis.
+
+1.  **Build the Container**:
     ```bash
-    wsl bash analysis/setup_wsl.sh
-    ```
-    *This script installs: Miniconda, BWA, GATK, Samtools, Nextflow, Cutadapt, and Picard.*
-2.  **Activate Environment**:
-    ```bash
-    source ~/miniconda3/etc/profile.d/conda.sh
-    conda activate amplicon_pipeline
+    docker build -t amplicon-project .
     ```
 
-### Containerized (Docker)
-For cross-platform reproducibility:
-```bash
-docker build -t amplicon-pipeline .
-docker run -v $(pwd):/app amplicon-pipeline
-```
+2.  **Usage Basics**:
+    *   **Design**: `docker run -v $(pwd):/app amplicon-project python design.py [args]`
+    *   **Analyze**: `docker run -v $(pwd):/app amplicon-project nextflow run analysis/main.nf [args]`
+
+---
+
+### 🐍 Optional: Native Python Development (Advanced)
+If you are only editing `design.py` or biophysical logic and don't need the full NGS alignment stack, you can use a local Conda environment:
+1.  **Setup**: `conda create -n amplicon_dev python=3.10 biopython primer3-py tqdm pandas matplotlib`
+2.  **Activate**: `conda activate amplicon_dev`
+*Note: This will not support the full `analysis/main.nf` pipeline.*
 
 ---
 
 ## 🎯 Module 1: Primer Design (`design.py`)
 
-The unified design tool supports three distinct operational modes.
+The unified design tool is powered by the `core/` biophysics library. It supports three distinct operational modes.
 
 ### Mode A: Initial Multi-Gene Design
 Designing primers from scratch for a list of target genes.
 ```bash
-python design/design.py \
+python design.py \
     --genome common_refs/ecoli_genome.cleaned.fna \
     --gff common_refs/genomic.gff \
     --target-file design/targets/housekeeping_genes.txt \

@@ -17,3 +17,7 @@ dependencies:
   - openjdk=17
   - pandas
   - matplotlib
+  - biopython
+  - primer3-py
+  - tqdm
+  - blast

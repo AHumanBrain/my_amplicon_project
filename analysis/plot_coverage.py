@@ -1,46 +1,13 @@
-import argparse
-import subprocess
-import sys
+import logging
 import json
-import csv
+import argparse
 from pathlib import Path
 
+# --- Modular Imports ---
+from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
 
-def parse_picard_pcr_metrics(metrics_file):
-    """Parse Picard TargetedPcrMetrics output."""
-    metrics = {}
-    try:
-        with open(metrics_file) as f:
-            lines = f.readlines()
-            for i, line in enumerate(lines):
-                if line.strip().startswith('CUSTOM_AMPLICON_SET'):
-                    # This line is headers, next line is values
-                    headers = lines[i].strip().split('\t')
-                    values = lines[i+1].strip().split('\t')
-                    metrics = dict(zip(headers, values))
-                    break
-    except Exception as e:
-        print(f"Warning: Could not parse Picard metrics: {e}")
-    return metrics
-
-
-def parse_per_target_coverage(coverage_file):
-    """Parse Picard per-target coverage output."""
-    targets = []
-    try:
-        with open(coverage_file) as f:
-            reader = csv.DictReader(f, delimiter='\t')
-            for row in reader:
-                targets.append({
-                    'name': row['name'],
-                    'chrom': row['chrom'],
-                    'start': int(row['start']),
-                    'end': int(row['end']),
-                    'mean_coverage': float(row['mean_coverage'])
-                })
-    except Exception as e:
-        print(f"Warning: Could not parse per-target coverage: {e}")
-    return targets
+# --- Logging Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
 
 def generate_html_report(picard_metrics, per_target_stats, output_file, feedback_file):
