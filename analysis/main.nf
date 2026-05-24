@@ -34,6 +34,11 @@ process FASTQC {
     path "*.html", emit: html
     path "*.zip", emit: zip
 
+    stub:
+    """
+    touch fastqc_stub.html fastqc_stub.zip
+    """
+
     script:
     """
     fastqc -q $reads
@@ -51,6 +56,11 @@ process TRIM_PRIMERS {
     output:
     tuple val(sample_id), path("*.trimmed.fastq.gz"), emit: trimmed_reads
     path "*.log", emit: log
+
+    stub:
+    """
+    touch ${sample_id}_R1.trimmed.fastq.gz ${sample_id}_cutadapt.log
+    """
 
     // Using -g (5' adapter) for R1 and -G (5' adapter) for R2
     // Assuming primers are anchored at the 5' end.
@@ -90,6 +100,13 @@ process BUILD_INDICES {
     // We emit the genome file again to pass it along with indices
     path genome, emit: fasta 
 
+    stub:
+    """
+    touch ${genome}.amb ${genome}.ann ${genome}.bwt ${genome}.pac ${genome}.sa
+    touch ${genome}.fai
+    touch ${genome.baseName}.dict
+    """
+
     script:
     """
     bwa index $genome
@@ -108,6 +125,11 @@ process ALIGN {
 
     output:
     tuple val(sample_id), path("*.bam"), emit: bam
+
+    stub:
+    """
+    touch ${sample_id}.bam
+    """
 
     script:
     if (reads instanceof List && reads.size() == 2) {
@@ -133,6 +155,11 @@ process SORT_INDEX_BAM {
     output:
     tuple val(sample_id), path("*.sorted.bam"), path("*.sorted.bam.bai"), emit: sorted_bam
 
+    stub:
+    """
+    touch ${sample_id}.sorted.bam ${sample_id}.sorted.bam.bai
+    """
+
     script:
     """
     samtools sort -o ${sample_id}.sorted.bam $bam
@@ -148,6 +175,11 @@ process PREP_INTERVALS {
 
     output:
     path "targets.interval_list", emit: interval_list
+
+    stub:
+    """
+    touch targets.interval_list
+    """
 
     script:
     """
@@ -168,6 +200,11 @@ process MARK_DUPLICATES {
     output:
     tuple val(sample_id), path("${sample_id}.marked.bam"), path("${sample_id}.marked.bai"), emit: marked_bam
     path "${sample_id}.mark_dups_metrics.txt", emit: metrics
+
+    stub:
+    """
+    touch ${sample_id}.marked.bam ${sample_id}.marked.bai ${sample_id}.mark_dups_metrics.txt
+    """
 
     script:
     """
@@ -198,6 +235,12 @@ process PICARD_METRICS {
     path "${sample_id}_pcr_metrics.txt", emit: pcr_metrics
     path "${sample_id}.per_target_coverage.txt", emit: target_coverage
     path "*.{txt,pdf}", emit: all_metrics
+
+    stub:
+    """
+    touch ${sample_id}_pcr_metrics.txt ${sample_id}.per_target_coverage.txt \
+          ${sample_id}_alignment_metrics.txt ${sample_id}_insert_size_metrics.txt
+    """
 
     script:
     """
@@ -231,6 +274,11 @@ process GERMLINE_CALLING {
     output:
     path "${sample_id}.g.vcf.gz", emit: vcf
 
+    stub:
+    """
+    touch ${sample_id}.g.vcf.gz
+    """
+
     // Using PCR indel model conservatively for germline
     script:
     """
@@ -256,6 +304,11 @@ process MUTECT2_CALLING {
     output:
     path "${sample_id}.somatic.vcf.gz", emit: vcf
 
+    stub:
+    """
+    touch ${sample_id}.somatic.vcf.gz
+    """
+
     // Mutect2 in tumor-only mode for low-frequency variants
     script:
     """
@@ -277,6 +330,11 @@ process COVERAGE_TRACKS {
     output:
     path "*.bw"
 
+    stub:
+    """
+    touch ${sample_id}.bw
+    """
+
     script:
     """
     bamCoverage -b $bam -o ${sample_id}.bw
@@ -291,6 +349,11 @@ process MULTIQC {
 
     output:
     path "multiqc_report.html"
+
+    stub:
+    """
+    touch multiqc_report.html
+    """
 
     script:
     """
@@ -311,6 +374,11 @@ process PLOT_COVERAGE {
     path "${sample_id}_coverage_report.html", emit: html
     path "${sample_id}_balancing_feedback.json", emit: json
     path "${sample_id}_uniformity.png", emit: png
+
+    stub:
+    """
+    touch ${sample_id}_coverage_report.html ${sample_id}_balancing_feedback.json ${sample_id}_uniformity.png
+    """
 
     script:
     """

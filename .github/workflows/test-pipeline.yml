@@ -77,7 +77,14 @@ jobs:
         shell: micromamba-shell {0}
         run: |
           cd analysis
-          nextflow run main.nf --outdir ../results -preview
+          nextflow run main.nf \
+            --genome ../common_refs/ecoli_genome.cleaned.fna \
+            --reads '../raw_data/TestSample_R{1,2}.fastq.gz' \
+            --primers ../design/output/final_primers_pool_1_trimming.fasta \
+            --bed ../design/output/final_primers_pool_1.bed \
+            --outdir ../results \
+            -stub-run \
+            -work-dir /tmp/nf_work
       
       - name: Verify workflow structure
         run: |
