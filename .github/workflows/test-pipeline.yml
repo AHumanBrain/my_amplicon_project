@@ -45,9 +45,8 @@ jobs:
           cache-environment: true
       
       - name: Verify tool installations
-        shell: bash -el {0}
+        shell: micromamba-shell {0}
         run: |
-          micromamba activate amplicon_pipeline
           nextflow -version
           bwa 2>&1 | head -1 || true
           samtools --version | head -1
@@ -75,9 +74,8 @@ jobs:
           echo -e "@read1\nGCATGCATGCATGCAT\n+\nIIIIIIIIIIIIIIII" | gzip > raw_data/TestSample_R2.fastq.gz
       
       - name: Run pipeline (dry-run)
-        shell: bash -el {0}
+        shell: micromamba-shell {0}
         run: |
-          micromamba activate amplicon_pipeline
           cd analysis
           nextflow run main.nf --outdir ../results -preview
       
