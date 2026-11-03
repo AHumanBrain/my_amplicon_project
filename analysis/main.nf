@@ -405,20 +405,27 @@ workflow {
         .fromFilePairs(params.reads, size: -1) { file -> file.name.replaceAll(/_R[12].*/, '') }
         .set { read_pairs_ch }
 
+    // Reference inputs must be real file objects (a bare relative path string is
+    // not a valid `path` value). fromPath also accepts globs; .first() makes a
+    // value channel so every sample can reuse it.
+    genome_ch  = Channel.fromPath(params.genome,  checkIfExists: true).first()
+    bed_ch     = Channel.fromPath(params.bed,     checkIfExists: true).first()
+    primers_ch = Channel.fromPath(params.primers, checkIfExists: true).first()
+
     // 2. Build Reference Indices (runs once)
-    BUILD_INDICES(params.genome)
+    BUILD_INDICES(genome_ch)
     
     // 3. Prepare Intervals (runs once)
-    PREP_INTERVALS(params.bed, BUILD_INDICES.out.dict)
+    PREP_INTERVALS(bed_ch, BUILD_INDICES.out.dict)
 
     // 4. Raw QC
     FASTQC(read_pairs_ch)
 
     // 5. Trim Primers
-    TRIM_PRIMERS(read_pairs_ch, params.primers)
+    TRIM_PRIMERS(read_pairs_ch, primers_ch)
 
     // 6. Align
-    ALIGN(TRIM_PRIMERS.out.trimmed_reads, BUILD_INDICES.out.bwa_index, params.genome)
+    ALIGN(TRIM_PRIMERS.out.trimmed_reads, BUILD_INDICES.out.bwa_index, genome_ch)
 
     // 7. Sort & Index
     SORT_INDEX_BAM(ALIGN.out.bam)
