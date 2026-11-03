@@ -22,7 +22,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install biopython primer3-py tqdm pandas matplotlib pytest
+          pip install biopython primer3-py tqdm pandas matplotlib pytest pyflakes
       
       - name: Run unit tests
         run: |

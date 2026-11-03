@@ -164,3 +164,37 @@ class TestBlastDbCreation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestRegressionUndefinedNames:
+    """Guards against the missing-import/constant bugs that broke design.py."""
+
+    def test_primer3_design_runs(self):
+        import random
+        random.seed(1)
+        seq = "".join(random.choice("ACGT") for _ in range(400))
+        res = design.design_primers_for_sequence(seq, "t", {}, num_candidates=3)
+        assert "PRIMER_PAIR_NUM_RETURNED" in res
+
+    def test_adapter_and_hairpin_constants(self):
+        for name in ("FWD_P5_TRUNCATED", "REV_P7_TRUNCATED", "FWD_RC_P5_TRUNCATED",
+                     "REV_RC_P7_TRUNCATED", "HAIRPIN_STEM_TARGET_DG", "HAIRPIN_CLAMP_MAX_LEN"):
+            assert hasattr(design, name)
+
+    def test_write_outputs(self, tmp_path):
+        row = {'target_id': 'g', 'pair_rank': '0 (S)', 'flags': 'OK',
+               'fwd_primer_tailed': 'A', 'rev_primer_tailed': 'C',
+               'fwd_primer_seq': 'ACGTACGTAC', 'rev_primer_seq': 'TTGGCCAATT',
+               'fwd_primer_tm': '60', 'rev_primer_tm': '60',
+               'amplicon_size': 150, 'specificity_hits': 'F:1, R:1'}
+        prefix = str(tmp_path / "out")
+        design.write_design_output_files([row], ["c\t0\t150\tg\t0\t+\n"], prefix, [], [])
+        assert (tmp_path / "out.csv").exists()
+        fasta = (tmp_path / "out_trimming.fasta").read_text()
+        assert fasta.startswith(">g_F\n" + design.FWD_P5_TRUNCATED)
+
+    def test_no_undefined_names(self):
+        import subprocess
+        out = subprocess.run([sys.executable, "-m", "pyflakes", "design.py"],
+                             capture_output=True, text=True).stdout
+        assert "undefined name" not in out, out

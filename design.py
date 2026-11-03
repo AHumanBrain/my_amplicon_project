@@ -1,12 +1,13 @@
 import argparse
+import csv
 import json
 import os
 import subprocess
 import shutil
 import multiprocessing
-import itertools
 import logging
 from functools import partial, lru_cache
+import primer3
 from tqdm import tqdm
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -14,8 +15,8 @@ import re
 
 # --- Modular Imports ---
 from core.biophysics import BioConfig, get_heterodimer_dg, get_end_stability_dg, get_homodimer_dg, add_hairpin_clamp
-from core.adapters import Adapters, format_primer
-from core.io_utils import parse_bed, parse_target_list, write_csv_recipe
+from core.adapters import Adapters
+from core.io_utils import parse_target_list
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -27,13 +28,21 @@ logging.basicConfig(
     ]
 )
 
-# --- Legacy Constants (Mpped to BioConfig) ---
+# --- Legacy Constants (Mapped to BioConfig) ---
 END_STABILITY_DG_THRESHOLD = BioConfig.END_STABILITY_DG_THRESHOLD
 IDEAL_TM_MIN = BioConfig.IDEAL_TM_MIN
 IDEAL_TM_MAX = BioConfig.IDEAL_TM_MAX
 IDEAL_PRIMER_MIN_SIZE = 19 
 MAX_HETERODIMER_DG = BioConfig.MAX_HETERODIMER_DG
 MAX_SELF_DIMER_DG = BioConfig.MAX_SELF_DIMER_DG
+
+# --- Adapter tails and hairpin settings (single source of truth: core/) ---
+FWD_P5_TRUNCATED = Adapters.FWD_P5_TRUNCATED
+REV_P7_TRUNCATED = Adapters.REV_P7_TRUNCATED
+FWD_RC_P5_TRUNCATED = Adapters.FWD_RC_P5_TRUNCATED
+REV_RC_P7_TRUNCATED = Adapters.REV_RC_P7_TRUNCATED
+HAIRPIN_STEM_TARGET_DG = BioConfig.HAIRPIN_STEM_TARGET_DG
+HAIRPIN_CLAMP_MAX_LEN = 20
 
 # --- Large-Panel Logic ---
 MAX_CLASH_RECOMMENDATION = 5
