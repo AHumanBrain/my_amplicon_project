@@ -1,5 +1,4 @@
 import csv
-from Bio import SeqIO
 
 def parse_bed(bed_path):
     """Parses a BED file into a list of (chrom, start, end, name) tuples."""

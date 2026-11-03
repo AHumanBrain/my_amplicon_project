@@ -198,3 +198,130 @@ class TestRegressionUndefinedNames:
         out = subprocess.run([sys.executable, "-m", "pyflakes", "design.py"],
                              capture_output=True, text=True).stdout
         assert "undefined name" not in out, out
+
+
+class TestBlastBatch:
+    def test_batch_parses_hits_and_flags_nonspecific(self, monkeypatch):
+        import subprocess
+
+        class P:
+            stdout = "q0\tchr\t10\t30\nq1\tchr\t5\t25\nq1\tchr\t900\t920\n"
+
+        def fake_run(cmd, input, **kw):
+            assert input.count(">") == 2
+            return P()
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        res = design.run_blast_batch(["AAAA", "CCCC"], "db")
+        assert res["AAAA"][2] is True and res["AAAA"][0] == 1
+        assert res["CCCC"][2] is False and "2 hits" in res["CCCC"][3]
+
+    def test_blast_failure_fails_closed(self, monkeypatch):
+        import subprocess
+
+        def boom(*a, **k):
+            raise subprocess.CalledProcessError(1, "blastn")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        res = design.run_blast_batch(["AAAA"], "db")
+        assert res["AAAA"][2] is False
+
+
+class TestDesignAndPacking:
+    @pytest.fixture
+    def genome(self):
+        import random
+        rng = random.Random(7)
+        seq = "".join(rng.choice("ACGT") for _ in range(6000))
+        return {"chr": SeqRecord(Seq(seq), id="chr")}, {
+            "g1": {"contig": "chr", "start": 500, "end": 1000, "strand": "+"},
+            "g2": {"contig": "chr", "start": 3000, "end": 3500, "strand": "+"},
+        }
+
+    def _design(self, genome, tid, monkeypatch):
+        recs, coords = genome
+        monkeypatch.setattr(design, "run_blast_batch",
+                            lambda seqs, db, **k: {q: (1, [], True, None) for q in seqs})
+        return design.process_single_target(tid, recs, coords, "db", False, "rc_tailed", False,
+                                            num_candidates=10)
+
+    def test_process_single_target(self, genome, monkeypatch):
+        tid, pairs, err = self._design(genome, "g1", monkeypatch)
+        assert err is None and pairs
+        bed = pairs[0]["bed_row"].split("\t")
+        assert " " not in bed[3] and "(" not in bed[3]
+        assert int(bed[2]) - int(bed[1]) > 0
+
+    def test_sort_key_is_numeric(self, genome, monkeypatch):
+        _, pairs, _ = self._design(genome, "g1", monkeypatch)
+        keys = [p["sort_key"] for p in pairs]
+        assert all(isinstance(k[1], int) for k in keys)
+
+    def test_packing_deterministic_with_seed(self, genome, monkeypatch):
+        m = {}
+        for t in ("g1", "g2"):
+            _, pairs, _ = self._design(genome, t, monkeypatch)
+            m[t] = sorted(pairs, key=lambda x: x["sort_key"])
+        a = design.pack_targets_first_fit(m, False, 5, seed=3)
+        b = design.pack_targets_first_fit(m, False, 5, seed=3)
+        assert [[r["csv_row"]["target_id"] for r in p] for p in a] == \
+               [[r["csv_row"]["target_id"] for r in p] for p in b]
+
+
+class TestBiophysics:
+    def test_invalid_sequence_is_not_reported_as_no_dimer(self):
+        from core.biophysics import get_homodimer_dg
+        assert get_homodimer_dg("ACGT" * 40) < -100  # primer3 rejects >60nt
+
+    def test_heterodimer_symmetric(self):
+        from core.biophysics import get_heterodimer_dg
+        assert get_heterodimer_dg("GAGACCTACCAGCTCACCTC", "TCCACGGCAATCTCGATGAT") == \
+               get_heterodimer_dg("TCCACGGCAATCTCGATGAT", "GAGACCTACCAGCTCACCTC")
+
+
+class TestFeedback:
+    def test_redesign_targets_mapped_to_gene_ids(self, tmp_path, monkeypatch):
+        import argparse, json
+        fb = {"target_recommendations": [
+            {"target_id": "gyrB_amplicon_Strategy_0_2", "rel_mean": 0.0,
+             "recommended_adjustment": 10.0, "action": "🔥 FLAG FOR REDESIGN"},
+            {"target_id": "recA_amplicon_Strategy_0_0", "rel_mean": 1.0,
+             "recommended_adjustment": 1.0, "action": "Maintain current concentration"}]}
+        f = tmp_path / "fb.json"
+        f.write_text(json.dumps(fb))
+        seen = {}
+        monkeypatch.setattr(design, "run_design_mode", lambda a: seen.update(
+            targets=open(a.target_file).read().split(), rescue=a.rescue))
+        args = argparse.Namespace(feedback=str(f), genome="g", gff="g",
+                                  output_prefix=str(tmp_path / "o"), rescue=False)
+        design.run_feedback_mode(args)
+        assert seen == {"targets": ["gyrB"], "rescue": True}
+        assert (tmp_path / "o_rebalancing_recipe.csv").exists()
+
+
+class TestSimulatorAndFixture:
+    def test_simulator_is_deterministic(self, tmp_path):
+        import gzip
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(design.__file__)), "analysis"))
+        import generate_simulated_fastq as sim
+        genome = {"c": SeqRecord(Seq("ACGT" * 500), id="c")}
+        iv = [("c", 100, 400, "t1")]
+        outs = []
+        for n in ("a", "b"):
+            sim.generate_fastq_records(iv, genome, 20, 100, str(tmp_path / n), seed=5,
+                                       non_uniform=True, thermal_bias=60.0)
+            outs.append(gzip.open(str(tmp_path / n) + "_R1.fastq.gz", "rt").read())
+        assert outs[0] == outs[1] and outs[0]
+
+    def test_stable_offset_is_stable(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(design.__file__)), "analysis"))
+        import generate_simulated_fastq as sim
+        assert sim.stable_offset("abc") == sim.stable_offset("abc")
+
+    def test_fixture_builds(self, tmp_path):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(design.__file__)), "scripts"))
+        import make_test_fixture as fx
+        out = fx.build("common_refs/ecoli_genome.cleaned.fna", str(tmp_path), coverage=5)
+        for f in ("genome.fna", "targets.bed", "primers_trimming.fasta",
+                  "FixtureSample_R1.fastq.gz", "FixtureSample_R2.fastq.gz"):
+            assert os.path.exists(os.path.join(out, f))

@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import shutil
+import sys
 import multiprocessing
 import logging
 from functools import partial, lru_cache
@@ -11,6 +12,7 @@ import primer3
 from tqdm import tqdm
 from Bio import SeqIO
 from Bio.Seq import Seq
+import random
 import re
 
 # --- Modular Imports ---
@@ -19,14 +21,15 @@ from core.adapters import Adapters
 from core.io_utils import parse_target_list
 
 # --- Logging Configuration ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("design_production.log"),
-        logging.StreamHandler()
-    ]
-)
+log = logging.getLogger("design")
+
+
+def configure_logging(log_file=None):
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    logging.basicConfig(level=logging.INFO, handlers=handlers,
+                        format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Legacy Constants (Mapped to BioConfig) ---
 END_STABILITY_DG_THRESHOLD = BioConfig.END_STABILITY_DG_THRESHOLD
@@ -190,47 +193,52 @@ def design_primers_for_sequence(sequence, target_id, strategy_settings, num_cand
     
     return primer3.design_primers(seq_args, global_args)
 
-def run_blast_specificity_check(primer_seq, blast_db_path, strict_threshold=1):
+def run_blast_batch(primer_seqs, blast_db_path, strict_threshold=1, threads=1):
+    """Specificity-check many primers with ONE blastn call.
+
+    Returns {seq: (hit_count, hit_locations, is_specific, warning_or_None)}.
+    Only exact, full-length matches count as hits (100% identity/coverage).
     """
-    Check primer specificity using BLAST.
-    
-    Returns:
-        tuple: (hit_count, hit_locations, is_specific, warning_message)
-        - hit_count: Number of perfect matches in the genome
-        - hit_locations: List of (contig, start, end) tuples
-        - is_specific: True if hit_count <= strict_threshold
-        - warning_message: Warning string if primer is non-specific, else None
-    """
+    seqs = sorted(set(primer_seqs))
+    if not seqs:
+        return {}
+    query = "".join(f">q{i}\n{q}\n" for i, q in enumerate(seqs))
     command = [
         'blastn', '-query', '-', '-db', blast_db_path, '-task', 'blastn-short',
-        '-outfmt', '6 sseqid sstart send', '-perc_identity', '100', '-qcov_hsp_perc', '100',
-        '-num_threads', '4'
+        '-outfmt', '6 qseqid sseqid sstart send', '-perc_identity', '100',
+        '-qcov_hsp_perc', '100', '-num_threads', str(threads)
     ]
     try:
-        process = subprocess.run(command, input=f">primer\n{primer_seq}", capture_output=True, text=True, check=True)
-        
-        hit_locations = []
-        if process.stdout.strip():
-            for line in process.stdout.strip().split('\n'):
-                parts = line.split('\t')
-                if len(parts) >= 3:
-                    hit_locations.append((parts[0], int(parts[1]), int(parts[2])))
-        
-        hit_count = len(hit_locations)
-        is_specific = hit_count <= strict_threshold
-        
-        warning_message = None
-        if not is_specific:
-            locations_str = ', '.join([f"{loc[0]}:{loc[1]}-{loc[2]}" for loc in hit_locations[:3]])
-            if hit_count > 3:
-                locations_str += f" (+{hit_count - 3} more)"
-            warning_message = f"Non-specific primer ({hit_count} hits): {locations_str}"
-        
-        return hit_count, hit_locations, is_specific, warning_message
-        
-    except subprocess.CalledProcessError as e:
-        # BLAST failed, return safe defaults
-        return 0, [], True, f"BLAST check failed: {e}"
+        proc = subprocess.run(command, input=query, capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        # Fail closed: a failed specificity check must not look like "specific".
+        msg = f"BLAST check failed: {e}"
+        log.error(msg)
+        return {q: (0, [], False, msg) for q in seqs}
+
+    hits = {i: [] for i in range(len(seqs))}
+    for line in proc.stdout.strip().splitlines():
+        parts = line.split('\t')
+        if len(parts) >= 4:
+            hits[int(parts[0][1:])].append((parts[1], int(parts[2]), int(parts[3])))
+
+    results = {}
+    for i, q in enumerate(seqs):
+        locs = hits[i]
+        specific = len(locs) <= strict_threshold
+        warning = None
+        if not specific:
+            shown = ', '.join(f"{c}:{st}-{en}" for c, st, en in locs[:3])
+            if len(locs) > 3:
+                shown += f" (+{len(locs) - 3} more)"
+            warning = f"Non-specific primer ({len(locs)} hits): {shown}"
+        results[q] = (len(locs), locs, specific, warning)
+    return results
+
+
+def run_blast_specificity_check(primer_seq, blast_db_path, strict_threshold=1):
+    """Single-primer convenience wrapper around run_blast_batch."""
+    return run_blast_batch([primer_seq], blast_db_path, strict_threshold)[primer_seq]
 
 def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_warnings, failed_targets_initial):
     if not all_csv_rows:
@@ -241,7 +249,7 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
     output_dir = os.path.dirname(output_prefix)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
-        logging.info(f"Created output directory: {output_dir}")
+        log.info(f"Created output directory: {output_dir}")
 
     csv_file, bed_file = f"{output_prefix}.csv", f"{output_prefix}.bed"
     trimming_fasta = f"{output_prefix}_trimming.fasta"
@@ -284,17 +292,12 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         if final_warnings:
             dimf.write("WARNINGS / RESIDUAL CLASHES:\n")
             # Sort warnings by dG (worst first)
-            try:
-                sorted_warnings = sorted(list(set(final_warnings)), key=lambda x: x[1])
-                for msg, dg in sorted_warnings:
-                    dimf.write(f"  [{dg:.2f} kcal/mol] {msg}\n")
-            except:
-                for warning in final_warnings:
-                    dimf.write(f"  {warning}\n")
+            for msg, dg in sorted(set(final_warnings), key=lambda x: x[1]):
+                dimf.write(f"  [{dg:.2f} kcal/mol] {msg}\n")
         else:
             dimf.write("Thermodynamic Success: No significant dimerization predicted (dG thresholds respected).\n")
 
-    logging.info(f"Results for {len(all_csv_rows)} specific targets saved to: {output_prefix}.csv/.bed/.fasta/.dimers.txt")
+    log.info(f"Results for {len(all_csv_rows)} specific targets saved to: {output_prefix}.csv/.bed/.fasta/.dimers.txt")
     
     log_file = f"{output_prefix}.log.txt"
     with open(log_file, 'w') as logf:
@@ -302,11 +305,7 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         
         if final_warnings:
             logf.write("--- Final Compatibility Warnings ---\n")
-            try:
-                sorted_warnings = sorted(list(set(final_warnings)), key=lambda x: x[1])
-            except TypeError:
-                sorted_warnings = final_warnings 
-            for warning_msg, dg_val in sorted_warnings:
+            for warning_msg, dg_val in sorted(set(final_warnings), key=lambda x: x[1]):
                 logf.write(f"   - {warning_msg}\n")
         
         if failed_targets_initial:
@@ -317,7 +316,22 @@ def write_design_output_files(all_csv_rows, all_bed_rows, output_prefix, final_w
         if not final_warnings and not failed_targets_initial:
             logf.write("Design complete. All targets were successful and compatible.\n")
             
-    logging.info(f"A detailed log of warnings has been saved to '{log_file}'")
+    log.info(f"A detailed log of warnings has been saved to '{log_file}'")
+
+STRATEGY_ORDER = {"Strategy 0 (Ideal)": 0, "Strategy 1 (Longer)": 1,
+                  "Strategy 2 (Shorter)": 2, "Strategy 3 (Relaxed Tm)": 3}
+
+
+def sanitize_name(text):
+    """BED/Picard-safe name: no whitespace or parentheses."""
+    return re.sub(r'[^A-Za-z0-9_.-]+', '_', str(text)).strip('_')
+
+
+def _init_worker(thresholds):
+    """Pool initializer: re-apply CLI thresholds in every worker process."""
+    global MAX_HETERODIMER_DG, MAX_SELF_DIMER_DG, END_STABILITY_DG_THRESHOLD
+    MAX_HETERODIMER_DG, MAX_SELF_DIMER_DG, END_STABILITY_DG_THRESHOLD = thresholds
+
 
 def process_single_target(target_id, genome_records, gene_coords, blast_db, force_multiprime, oligo_format, add_hairpin_clamp, rescue=False, num_candidates=25):
     
@@ -339,7 +353,7 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
             continue
 
         all_specific_pairs_for_target = []
-        seq_len = len(target_sequence)
+        blast_cache = {}
 
         def find_valid_pairs(primer_results, strategy_name, current_shift):
             num_returned = primer_results.get('PRIMER_PAIR_NUM_RETURNED', 0)
@@ -347,15 +361,16 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
                 return False 
 
             found_at_least_one = False
+            # One BLAST call for every primer of this candidate batch.
+            wanted = {primer_results[f'PRIMER_{side}_{k}_SEQUENCE']
+                      for k in range(num_returned) for side in ('LEFT', 'RIGHT')}
+            blast_cache.update(run_blast_batch(wanted - blast_cache.keys(), blast_db))
             for i in range(num_returned):
                 fwd_seq = primer_results[f'PRIMER_LEFT_{i}_SEQUENCE']
                 rev_seq = primer_results[f'PRIMER_RIGHT_{i}_SEQUENCE']
                 
-                try:
-                    fwd_hits, _, fwd_specific, fwd_warning = run_blast_specificity_check(fwd_seq, blast_db)
-                    rev_hits, _, rev_specific, rev_warning = run_blast_specificity_check(rev_seq, blast_db)
-                except Exception as e:
-                    continue 
+                fwd_hits, _, fwd_specific, _ = blast_cache[fwd_seq]
+                rev_hits, _, rev_specific, _ = blast_cache[rev_seq]
 
                 specificity_ok = (fwd_specific and rev_specific)
                 if not force_multiprime and not specificity_ok:
@@ -395,6 +410,7 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
                     rev_primer_tailed = rev_rc + REV_RC_P7_TRUNCATED
 
                 pair_rank_str = f"{i} ({strategy_name})"
+                safe_label = sanitize_name(f"{strategy_name.split(' (')[0]}_{i}")
                 csv_row = {
                     'target_id': target_id, 'pair_rank': pair_rank_str, 
                     'flags': ";".join(flags) if flags else "OK", 
@@ -405,16 +421,16 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
                     'specificity_hits': f"F:{fwd_hits}, R:{rev_hits}"
                 }
                 try:
-                    ideal_strategy_settings = {} 
-                    # ideal_min_product_size is now defined at the top of the function
                     product_size = primer_results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE']
                     fwd_start_in_slice = primer_results[f'PRIMER_LEFT_{i}'][0]
                     amp_start = target_info['start'] - 1 + current_shift + fwd_start_in_slice
                     amp_end = amp_start + product_size
-                    bed_row = f"{target_info['contig']}\t{amp_start}\t{amp_end}\t{target_id}_amplicon_{pair_rank_str}\t0\t+\n"
-                    all_specific_pairs_for_target.append({'csv_row': csv_row, 'bed_row': bed_row})
-                except Exception as e:
-                    print(f"Error processing primer pair {i} for {target_id}: {e}")
+                    bed_row = f"{target_info['contig']}\t{amp_start}\t{amp_end}\t{sanitize_name(target_id)}_amplicon_{safe_label}\t0\t+\n"
+                    all_specific_pairs_for_target.append({
+                        'csv_row': csv_row, 'bed_row': bed_row,
+                        'sort_key': (STRATEGY_ORDER.get(strategy_name, 99), i)})
+                except (KeyError, IndexError, TypeError) as e:
+                    log.warning("Error processing primer pair %s for %s: %s", i, target_id, e)
                     continue
             
             return found_at_least_one
@@ -422,7 +438,8 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
         try:
             primer_results = design_primers_for_sequence(target_sequence, target_id, {}, num_candidates=num_candidates)
             find_valid_pairs(primer_results, "Strategy 0 (Ideal)", shift)
-        except: pass
+        except (OSError, RuntimeError) as e:  # primer3 rejects unusable templates
+            log.warning("primer3 failed for %s: %s", target_id, e)
 
         if not all_specific_pairs_for_target:
             fallback_strategies = [
@@ -434,7 +451,9 @@ def process_single_target(target_id, genome_records, gene_coords, blast_db, forc
                 try:
                     primer_results = design_primers_for_sequence(target_sequence, target_id, strategy['settings'], num_candidates=num_candidates)
                     if find_valid_pairs(primer_results, strategy['name'], shift): break
-                except: continue
+                except (OSError, RuntimeError) as e:
+                    log.warning("primer3 (%s) failed for %s: %s", strategy['name'], target_id, e)
+                    continue
 
         if all_specific_pairs_for_target:
             return (target_id, all_specific_pairs_for_target, None)
@@ -494,17 +513,16 @@ def is_compatible(candidate_pair, existing_pool_data, check_overlap):
                 
     return True, None
 
-def pack_targets_first_fit(target_to_primers_map, overlap_detected, monte_carlo_iterations=20):
+def pack_targets_first_fit(target_to_primers_map, overlap_detected, monte_carlo_iterations=20, seed=0):
     """
     (v8.5 Ready) Monte Carlo Packing Engine.
     Runs First-Fit multiple times with randomized target orderings to find the global minimum.
     """
-    import random
-    
     def get_target_coords(tid):
         bed = target_to_primers_map[tid][0]['bed_row'].split('\t')
         return (bed[0], int(bed[1]))
 
+    rng = random.Random(seed)
     all_tids = list(target_to_primers_map.keys())
     best_pools = None
     min_pool_count = float('inf')
@@ -513,7 +531,7 @@ def pack_targets_first_fit(target_to_primers_map, overlap_detected, monte_carlo_
     
     for i in range(monte_carlo_iterations):
         # On iteration 0, use genomic order (best heuristic). Subsequent iterations use random.
-        current_shuffled_tids = sorted(all_tids, key=get_target_coords) if i == 0 else random.sample(all_tids, len(all_tids))
+        current_shuffled_tids = sorted(all_tids, key=get_target_coords) if i == 0 else rng.sample(all_tids, len(all_tids))
         
         current_pools = [] # List of lists of primer_data
         
@@ -612,13 +630,14 @@ def run_design_mode(args):
         print(f"Starting parallel processing with {num_workers} workers for {len(target_ids)} targets...")
         
         results = []
-        with multiprocessing.Pool(processes=num_workers) as pool:
+        with multiprocessing.Pool(processes=num_workers, initializer=_init_worker,
+                                  initargs=((MAX_HETERODIMER_DG, MAX_SELF_DIMER_DG, END_STABILITY_DG_THRESHOLD),)) as pool:
             results = list(tqdm(pool.imap_unordered(process_func, target_ids), total=len(target_ids), desc="Designing Primers"))
 
         target_to_primers_map = {}
         for target_id, primer_list, error in results:
             if primer_list:
-                sorted_list = sorted(primer_list, key=lambda x: x['csv_row']['pair_rank'])
+                sorted_list = sorted(primer_list, key=lambda x: x['sort_key'])
                 target_to_primers_map[target_id] = sorted_list
             else:
                 if error: 
@@ -652,7 +671,7 @@ def run_design_mode(args):
         if run_minimum_pool_logic:
             # (v8.5 Ready) Pass monte_carlo_iterations and force_sparse
             check_overlap = overlap_detected or args.force_sparse
-            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters)
+            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters, args.seed)
             
             print(f"\nSUCCESS: Compressed {len(target_to_primers_map)} targets into {len(final_pools)} pools.")
             
@@ -671,8 +690,15 @@ def run_design_mode(args):
         else:
             # Forced single pool - simplified
             check_overlap = overlap_detected or args.force_sparse
-            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters)
-            pool_set = final_pools[0]
+            final_pools = pack_targets_first_fit(target_to_primers_map, check_overlap, args.monte_carlo_iters, args.seed)
+            pool_set = max(final_pools, key=len)
+            if len(final_pools) > 1:
+                kept = {r['csv_row']['target_id'] for r in pool_set}
+                dropped = sorted(t for t in target_to_primers_map if t not in kept)
+                msg = (f"--force-single-pool: targets could not share one tube; "
+                       f"kept {len(kept)}, left out {len(dropped)}: {', '.join(dropped)}")
+                log.warning(msg)
+                failed_targets_initial.append(msg)
             write_design_output_files([r['csv_row'] for r in pool_set], [r['bed_row'] for r in pool_set], args.output_prefix, [], failed_targets_initial)
 
         if failed_targets_initial:
@@ -681,9 +707,8 @@ def run_design_mode(args):
                 print(f"   - {reason}")
 
     except (FileNotFoundError, subprocess.CalledProcessError, RuntimeError, ValueError) as e:
-        print(f"\nAn error occurred: {e}")
-    except Exception as e:
-        print(f"\nAn unexpected error occurred: {e}")
+        log.error("Design failed: %s", e)
+        sys.exit(1)
 
 # --- Mode 2: Tail-Only Pipeline Functions ---
 
@@ -756,6 +781,11 @@ def parse_feedback(feedback_file):
         print(f"Error parsing feedback file '{feedback_file}': {e}")
         return None
 
+def target_gene_id(amplicon_name):
+    """'gyrB_amplicon_Strategy_0_3' -> 'gyrB'."""
+    return amplicon_name.split('_amplicon_')[0]
+
+
 def generate_pool_recipe(feedback_data, output_prefix):
     """
     Generates a pool re-balancing recipe (CSV) based on recommendations.
@@ -790,7 +820,7 @@ def run_feedback_mode(args):
     """
     Handles re-balancing and re-design based on feedback.
     """
-    print(f"\n--- Running in Feedback Mode ---")
+    print("\n--- Running in Feedback Mode ---")
     feedback_data = parse_feedback(args.feedback)
     if not feedback_data:
         return
@@ -799,10 +829,12 @@ def run_feedback_mode(args):
     generate_pool_recipe(feedback_data, args.output_prefix)
 
     # 2. Check for targets flagged for redesign
-    redesign_targets = [
-        rec['target_id'] for rec in feedback_data.get('target_recommendations', [])
+    # Amplicon names look like "<gene>_amplicon_<strategy>_<rank>"; map back to gene IDs.
+    redesign_targets = sorted({
+        target_gene_id(rec['target_id'])
+        for rec in feedback_data.get('target_recommendations', [])
         if "REDESIGN" in rec.get('action', "").upper()
-    ]
+    })
 
     if redesign_targets:
         print(f"Found {len(redesign_targets)} targets flagged for redesign: {', '.join(redesign_targets)}")
@@ -876,9 +908,12 @@ def main():
     tail_group.add_argument('--tail-fwd-file', help="Path to a text file with one forward primer per line.")
     tail_group.add_argument('--tail-rev-file', help="Path to a text file with one reverse primer per line.")
     
-    parser.add_argument('--output-prefix', default='output/final_primers', help="Prefix for output files (default: output/final_primers).")
+    parser.add_argument('--output-prefix', default='design/output/final_primers', help="Prefix for output files (default: design/output/final_primers).")
+    parser.add_argument('--seed', type=int, default=0, help="Random seed for Monte Carlo packing (default: 0).")
+    parser.add_argument('--log-file', default=None, help="Optional log file path.")
     
     args = parser.parse_args()
+    configure_logging(args.log_file)
 
     # --- (v8.0 Ready) Globalization of Constants from Arguments ---
     global MAX_HETERODIMER_DG, MAX_SELF_DIMER_DG, END_STABILITY_DG_THRESHOLD
