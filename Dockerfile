@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for Amplicon Project (Design & Analysis)
 # Uses micromamba for fast Conda environment creation
 
-FROM mambaorg/micromamba:1.5.6 as base
+FROM mambaorg/micromamba:1.5.6 AS base
 
 # Set working directory
 WORKDIR /app

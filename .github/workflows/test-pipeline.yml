@@ -6,87 +6,71 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test-design:
-    name: Test Design Script
+    name: Unit tests and lint
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+          cache: pip
+
       - name: Install dependencies
-        run: |
-          pip install biopython primer3-py tqdm pandas matplotlib pytest pyflakes
-      
+        run: pip install biopython primer3-py tqdm pandas matplotlib numpy pytest pyflakes
+
+      - name: Lint (undefined names are errors)
+        run: python -m pyflakes design.py core analysis scripts
+
       - name: Run unit tests
-        run: |
-          pytest test_design.py -v --tb=short
+        run: pytest test_design.py -v --tb=short
 
   test-pipeline:
-    name: Test Analysis Pipeline
+    name: Nextflow stub run
     runs-on: ubuntu-latest
     needs: test-design
-    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up Micromamba
-        uses: mamba-org/setup-micromamba@v1
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v1
         with:
           environment-file: environment.yml
           environment-name: amplicon_pipeline
           cache-environment: true
-      
+
       - name: Verify tool installations
         shell: micromamba-shell {0}
         run: |
           nextflow -version
           bwa 2>&1 | head -1 || true
           samtools --version | head -1
-      
-      - name: Create test data directories
-        run: |
-          mkdir -p raw_data results common_refs design/output
-      
-      - name: Create minimal test genome
-        run: |
-          echo ">NC_000913.3" > common_refs/ecoli_genome.cleaned.fna
-          echo "ATGCATGCATGCATGCATGCATGCATGCATGCATGC" >> common_refs/ecoli_genome.cleaned.fna
-      
-      - name: Create minimal test files
-        run: |
-          # Create minimal BED
-          echo -e "NC_000913.3\t0\t36\ttestAmplicon" > design/output/final_primers_pool_1.bed
-          
-          # Create minimal primers FASTA
-          echo -e ">FWD_test\nATGCATGC" > design/output/final_primers_pool_1_trimming.fasta
-          echo -e ">REV_test\nGCATGCAT" >> design/output/final_primers_pool_1_trimming.fasta
-          
-          # Create minimal FASTQ
-          echo -e "@read1\nATGCATGCATGCATGC\n+\nIIIIIIIIIIIIIIII" | gzip > raw_data/TestSample_R1.fastq.gz
-          echo -e "@read1\nGCATGCATGCATGCAT\n+\nIIIIIIIIIIIIIIII" | gzip > raw_data/TestSample_R2.fastq.gz
-      
-      - name: Run pipeline (dry-run)
+          cutadapt --version
+
+      - name: Build test fixture (genome slice, BED, primers, simulated reads)
+        shell: micromamba-shell {0}
+        run: python scripts/make_test_fixture.py --outdir "$RUNNER_TEMP/fixture"
+
+      - name: Run pipeline (stub)
         shell: micromamba-shell {0}
         run: |
+          FX="$RUNNER_TEMP/fixture"
           cd analysis
           nextflow run main.nf \
-            --genome ../common_refs/ecoli_genome.cleaned.fna \
-            --reads '../raw_data/TestSample_R{1,2}.fastq.gz' \
-            --primers ../design/output/final_primers_pool_1_trimming.fasta \
-            --bed ../design/output/final_primers_pool_1.bed \
-            --outdir ../results \
+            --genome "$FX/genome.fna" \
+            --reads "$FX/FixtureSample_R{1,2}.fastq.gz" \
+            --primers "$FX/primers_trimming.fasta" \
+            --bed "$FX/targets.bed" \
+            --outdir "$RUNNER_TEMP/results" \
             -stub-run \
-            -work-dir /tmp/nf_work
-      
-      - name: Verify workflow structure
+            -work-dir "$RUNNER_TEMP/nf_work"
+
+      - name: Check expected outputs
         run: |
-          echo "Pipeline dry-run completed successfully!"
-          ls -la analysis/
+          test -f "$RUNNER_TEMP/results/multiqc/multiqc_report.html"
+          ls "$RUNNER_TEMP/results"

@@ -1,4 +1,4 @@
-# 🧬 Multiplex PCR Ecosystem: Professional User Manual (v10.0)
+# 🧬 Multiplex PCR Ecosystem: Professional User Manual 
 
 Welcome to the **Integrated Multiplex PCR Ecosystem**. This codebase provides a complete, production-grade, software-defined bioinformatics toolkit for designing targeted sequencing primer panels, simulating PCR performances, executing Next-Generation Sequencing (NGS) data analysis, and closing the wet-dry loop with automated physical primer pool re-balancing.
 
@@ -45,7 +45,7 @@ flowchart TD
         TRIM["Cutadapt<br/><small>Primer trimming</small>"]
         ALIGN["BWA MEM<br/><small>Genome alignment</small>"]
         DUP["Picard MarkDuplicates<br/><small>PCR duplicate profiling</small>"]
-        FQC --> CUT --> BWA --> DUP
+        FQC --> TRIM --> ALIGN --> DUP
     end
 
     subgraph s5["Stage 5: Integrated Quantitation"]
@@ -65,7 +65,7 @@ flowchart TD
     GENOME & GFF & TARGETS --> P3
     FEEDBACK -- "Mode 3" --> P3
     MCMC --> CSV & BED & FASTAC
-    FASTAC --> CUT
+    FASTAC --> TRIM
     BED --> PIC
     FQ --> FQC
     DUP --> PIC & GATK & DEEP
@@ -88,29 +88,30 @@ This project isolates biophysical design, NGS analysis, simulation, and curation
 
 | Path | Type | Purpose / Description |
 | :--- | :--- | :--- |
-| [`design.py`](file:///c:/Users/hughe/260523/my_amplicon_project/design.py) | Python Script | Primers panel generator, adapter tailing tool, and feedback loop processor. |
-| [`core/`](file:///c:/Users/hughe/260523/my_amplicon_project/core) | Directory | Biophysical calculations and I/O utility scripts. |
-| ├─ [`core/biophysics.py`](file:///c:/Users/hughe/260523/my_amplicon_project/core/biophysics.py) | Python Script | Tm formulas, primer3-py wrappers, dimer thresholds, and 5' hairpin clamping. |
-| ├─ [`core/adapters.py`](file:///c:/Users/hughe/260523/my_amplicon_project/core/adapters.py) | Python Script | Standardized NGS adapters (P5/P7) and tailed-oligo formatting logic. |
-| └─ [`core/io_utils.py`](file:///c:/Users/hughe/260523/my_amplicon_project/core/io_utils.py) | Python Script | Parsers for BED targets, lists, and synthesis recipe exports. |
-| [`analysis/`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis) | Directory | Nextflow pipeline, plotting utilities, and simulator. |
-| ├─ [`analysis/main.nf`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/main.nf) | Nextflow Script | DSL2 pipeline orchestrating QC, alignment, duplicate tagging, metrics, and variant calling. |
-| ├─ [`analysis/nextflow.config`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/nextflow.config) | Nextflow Config | Resource bounds and profile definitions. |
-| ├─ [`analysis/generate_simulated_fastq.py`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/generate_simulated_fastq.py) | Python Script | Generates synthetic read pairs with mutations, non-uniformity, and thermal gradients. |
-| ├─ [`analysis/plot_coverage.py`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/plot_coverage.py) | Python Script | Parses Picard metrics to output coverage dashboards and balancing recommendations. |
-| ├─ [`analysis/plot_uniformity.py`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/plot_uniformity.py) | Python Script | Generates Paragon-style log-scale scatter plots showing panel uniformity. |
-| └─ [`analysis/analysis_utils.py`](file:///c:/Users/hughe/260523/my_amplicon_project/analysis/analysis_utils.py) | Python Script | Shared parser library for Picard PCR metrics files. |
-| [`scripts/`](file:///c:/Users/hughe/260523/my_amplicon_project/scripts) | Directory | Helper utilities for design input preparation and diagnostic analysis. |
-| ├─ [`scripts/curate_sparse_targets.py`](file:///c:/Users/hughe/260523/my_amplicon_project/scripts/curate_sparse_targets.py) | Python Script | Identifies physically separated, non-overlapping target genes from a GFF model. |
-| └─ [`scripts/measure_kmer_uniqueness.py`](file:///c:/Users/hughe/260523/my_amplicon_project/scripts/measure_kmer_uniqueness.py) | Python Script | Measures genome-wide k-mer frequencies to assess off-target cross-priming risks. |
-| [`common_refs/`](file:///c:/Users/hughe/260523/my_amplicon_project/common_refs) | Directory | Genomes (FASTA format) and annotation models (GFF format). |
-| [`design/`](file:///c:/Users/hughe/260523/my_amplicon_project/design) | Directory | Input target lists and output directories containing generated panels. |
-| [`ncbi_data/`](file:///c:/Users/hughe/260523/my_amplicon_project/ncbi_data) | Directory | Working directory for local genome BLAST databases. |
-| [`raw_data/`](file:///c:/Users/hughe/260523/my_amplicon_project/raw_data) | Directory | Destination folder for raw FASTQ inputs. |
-| [`results/`](file:///c:/Users/hughe/260523/my_amplicon_project/results) | Directory | Structured outputs of Nextflow pipeline runs (BAMs, VCFs, HTML reports). |
-| [`test_design.py`](file:///c:/Users/hughe/260523/my_amplicon_project/test_design.py) | Python Test Suite | Pytest unit test coverage verifying parser and thermodynamic utility functions. |
-| [`Dockerfile`](file:///c:/Users/hughe/260523/my_amplicon_project/Dockerfile) | Docker Configuration | Multi-stage container recipe building the conda environment and pipeline tools. |
-| [`environment.yml`](file:///c:/Users/hughe/260523/my_amplicon_project/environment.yml) | Conda Environment | Declared bioconda, conda-forge packages, and Python packages. |
+| [`design.py`](design.py) | Python Script | Primers panel generator, adapter tailing tool, and feedback loop processor. |
+| [`core/`](core) | Directory | Biophysical calculations and I/O utility scripts. |
+| ├─ [`core/biophysics.py`](core/biophysics.py) | Python Script | Tm formulas, primer3-py wrappers, dimer thresholds, and 5' hairpin clamping. |
+| ├─ [`core/adapters.py`](core/adapters.py) | Python Script | Standardized NGS adapters (P5/P7) and tailed-oligo formatting logic. |
+| └─ [`core/io_utils.py`](core/io_utils.py) | Python Script | Parsers for BED targets, lists, and synthesis recipe exports. |
+| [`analysis/`](analysis) | Directory | Nextflow pipeline, plotting utilities, and simulator. |
+| ├─ [`analysis/main.nf`](analysis/main.nf) | Nextflow Script | DSL2 pipeline orchestrating QC, alignment, duplicate tagging, metrics, and variant calling. |
+| ├─ [`analysis/nextflow.config`](analysis/nextflow.config) | Nextflow Config | Resource bounds and profile definitions. |
+| ├─ [`analysis/generate_simulated_fastq.py`](analysis/generate_simulated_fastq.py) | Python Script | Generates synthetic read pairs with mutations, non-uniformity, and thermal gradients. |
+| ├─ [`analysis/plot_coverage.py`](analysis/plot_coverage.py) | Python Script | Parses Picard metrics to output coverage dashboards and balancing recommendations. |
+| ├─ [`analysis/plot_uniformity.py`](analysis/plot_uniformity.py) | Python Script | Generates Paragon-style log-scale scatter plots showing panel uniformity. |
+| └─ [`analysis/analysis_utils.py`](analysis/analysis_utils.py) | Python Script | Shared parser library for Picard PCR metrics files. |
+| [`scripts/`](scripts) | Directory | Helper utilities for design input preparation and diagnostic analysis. |
+| ├─ [`scripts/curate_sparse_targets.py`](scripts/curate_sparse_targets.py) | Python Script | Identifies physically separated, non-overlapping target genes from a GFF model. |
+| └─ [`scripts/measure_kmer_uniqueness.py`](scripts/measure_kmer_uniqueness.py) | Python Script | Measures genome-wide k-mer frequencies to assess off-target cross-priming risks. |
+| [`common_refs/`](common_refs) | Directory | Genomes (FASTA format) and annotation models (GFF format). |
+| [`design/`](design) | Directory | Input target lists (`targets/`), generated outputs (`output/`, git-ignored) and reference example panels (`examples/`). |
+| [`ncbi_data/`](ncbi_data) | Directory | Working directory for local genome BLAST databases. |
+| [`raw_data/`](raw_data) | Directory | Destination folder for raw FASTQ inputs. |
+| [`results/`](results) | Directory | Structured outputs of Nextflow pipeline runs (BAMs, VCFs, HTML reports). |
+| [`test_design.py`](test_design.py) | Python Test Suite | Pytest suite: parsers, BLAST batching, design/packing, biophysics, feedback loop. |
+| [`scripts/make_test_fixture.py`](scripts/make_test_fixture.py) | Python Script | Builds a tiny genome slice + BED + primers + simulated reads for CI/smoke tests. |
+| [`Dockerfile`](Dockerfile) | Docker Configuration | Multi-stage container recipe building the conda environment and pipeline tools. |
+| [`environment.yml`](environment.yml) | Conda Environment | Declared bioconda, conda-forge packages, and Python packages. |
 
 ---
 
@@ -164,7 +165,7 @@ For local development or when running outside Docker, build the environment usin
 
 ## 🎯 Module 1: Primer Design (`design.py`)
 
-The unified design tool is powered by the [`core/biophysics.py`](file:///c:/Users/hughe/260523/my_amplicon_project/core/biophysics.py) library. It parses coordinates, runs BLAST checks to prevent off-target sequencing, applies thermodynamic filters to avoid primer dimerization, and optimizes multiplexing configurations.
+The unified design tool is powered by the [`core/biophysics.py`](core/biophysics.py) library. It parses coordinates, runs BLAST checks to prevent off-target sequencing, applies thermodynamic filters to avoid primer dimerization, and optimizes multiplexing configurations.
 
 ### 🧪 Biophysical Calibration & Rules
 The panel design engine implements thermodynamic constraints, calibrated for high-performance DNA polymerases like **Roche KAPA HiFi HotStart ReadyMix**.
@@ -244,7 +245,7 @@ python design.py \
 | `--gff` | Design / Feedback | Path | `common_refs/genomic.gff` | Genome annotation model for coordinate mapping. |
 | `--target-file` | Design | Path | *None* | Plain-text file list of target gene IDs (one per line). |
 | `--blast-db` | Design | String | `ncbi_data/ecoli_db` | Output prefix for the generated local BLAST database. |
-| `--force-single-pool` | Design | Flag | `False` | Forces design into a single pool even if overlaps exist. |
+| `--force-single-pool` | Design | Flag | `False` | Packs one tube (largest compatible set). Targets that cannot share it are listed in the log rather than silently dropped. |
 | `--force-sparse` | Design | Flag | `False` | Enforces zero overlaps between amplicons in a single pool. |
 | `--monte-carlo-iters`| Design | Integer| `20` | Shuffles target orders to compress panel pools. |
 | `--force-multiprime` | Design | Flag | `False` | Allows multi-locus primer hits (e.g., 16S rRNA genes). |
@@ -254,11 +255,13 @@ python design.py \
 | `--max-end-stability-dg`| Design | Float | `-6.0` | Maximum 3' end stability $\Delta G$ to prevent extensions. |
 | `--oligo-format` | All | Enum | `rc_tailed` | Format of tails: `rc_tailed` or `fwd_tailed`. |
 | `--add-hairpin-clamp`| Design | Flag | `False` | Appends a 5' hairpin stem clamp (requires `fwd_tailed`). |
-| `--feedback` | Feedback | Path | *None* | Path to the balancing feedback JSON from the analysis run. |
+| `--feedback` | Feedback | Path | *None* | Balancing feedback JSON from the analysis run. Takes priority over the other modes; also needs `--genome`/`--gff` (defaults apply) to redesign flagged targets. |
 | `--rescue` | Feedback | Flag | `False` | Shifts target windows if design fails or has no coverage. |
 | `--tail-fwd-file` | Tail-Only | Path | *None* | List of forward primer sequences to append tails to. |
 | `--tail-rev-file` | Tail-Only | Path | *None* | List of reverse primer sequences to append tails to. |
-| `--output-prefix` | All | Path | `output/final_primers` | Output prefix for CSV, BED, FASTA, and DIMERS files. |
+| `--output-prefix` | All | Path | `design/output/final_primers` | Output prefix for CSV, BED, FASTA, and DIMERS files. |
+| `--seed` | Design | Integer | `0` | Random seed for Monte Carlo packing (runs are reproducible). |
+| `--log-file` | All | Path | *None* | Optional file to also write logs to. |
 
 ---
 
@@ -317,9 +320,9 @@ flowchart LR
 ```
 
 1. **FASTQC**: Profiles raw reads to output base quality distributions.
-2. **TRIM_PRIMERS**: Runs Cutadapt to trim adapter/primer sequences. Un-trimmed reads are discarded to ensure specific mapping.
+2. **TRIM_PRIMERS**: Splits the trimming FASTA into forward (`*_F`) and reverse (`*_R`) primers and runs Cutadapt so R1 is only searched for forward primers and R2 for reverse primers (`-O` minimum overlap = `--min_primer_overlap`, default 15). Un-trimmed reads are discarded to ensure specific mapping.
 3. **BUILD_INDICES / ALIGN**: Indexes genomes and aligns reads using BWA MEM.
-4. **SORT_INDEX_BAM**: Sorts and index BAM alignments using Samtools.
+4. **ALIGN / SORT_INDEX_BAM**: BWA MEM output is piped straight into `samtools sort` (no unsorted intermediate); the BAM is then indexed.
 5. **MARK_DUPLICATES**: Profiles PCR duplicate rates using Picard.
 6. **PICARD_METRICS**: Runs Picard `CollectTargetedPcrMetrics` to calculate on-target percentages and uniformity metrics.
 7. **VARIANT_CALLING**:
@@ -369,7 +372,7 @@ For each target $t$, the script evaluates coverage to calculate adjustment recom
        --rescue \
        --output-prefix design/output/rebalanced_panel
    ```
-3. This creates a pipetting volume table [`design/output/rebalanced_panel_rebalancing_recipe.csv`](file:///c:/Users/hughe/260523/my_amplicon_project/design/output/rebalanced_panel_rebalancing_recipe.csv) and automatically triggers window-shifted redesigns for failed targets:
+3. This creates a pipetting volume table [`design/output/rebalanced_panel_rebalancing_recipe.csv`](design/output/rebalanced_panel_rebalancing_recipe.csv) and automatically triggers window-shifted redesigns for failed targets:
 
    * **Synthesis Order Recipe Table Structure**:
      ```csv

@@ -5,9 +5,12 @@ ncbi_data/*
 !ncbi_data/.gitkeep
 results/*
 !results/.gitkeep
-common_refs/*.fna
-common_refs/*.fasta
-common_refs/*.cleaned*
+# NOTE: the E. coli reference in common_refs/ is tracked on purpose (examples/CI).
+# Other genomes you add there are ignored:
+common_refs/*
+!common_refs/ecoli_genome.fna
+!common_refs/ecoli_genome.cleaned.fna
+!common_refs/genomic.gff
 
 # Nextflow / Analysis
 .nextflow*
@@ -28,6 +31,7 @@ design/*.bed
 design/*.csv
 design/*.fasta
 design/*.txt
+# Curated reference outputs live in design/examples/ (tracked)
 design/ncbi_data/*
 !design/ncbi_data/.gitkeep
 

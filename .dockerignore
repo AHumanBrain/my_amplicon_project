@@ -30,3 +30,7 @@ Thumbs.db
 
 # Artifacts
 *.gemini/
+
+# Large reference/design artefacts are mounted at runtime
+common_refs/*.fna
+design/examples/

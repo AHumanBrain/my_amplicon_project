@@ -5,7 +5,8 @@ channels:
   - nodefaults
 
 dependencies:
-  - nextflow
+  - python=3.11
+  - nextflow>=25.04,<26
   - fastqc
   - cutadapt
   - bwa
@@ -21,3 +22,6 @@ dependencies:
   - primer3-py
   - tqdm
   - blast
+  - numpy
+  - pytest
+  - pyflakes
