@@ -1,137 +1,131 @@
+"""Simulate paired-end amplicon reads from a BED of amplicon intervals.
+
+Deterministic for a given --seed. Reads are streamed to disk.
+"""
 import argparse
 import gzip
-import random
 import os
+import random
+import zlib
+
 from Bio import SeqIO
 from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
+
+BASES = "ACGT"
+
 
 def load_genome(genome_path):
     print(f"Loading genome from {genome_path}...")
-    genome_dict = SeqIO.to_dict(SeqIO.parse(genome_path, "fasta"))
-    return genome_dict
+    return SeqIO.to_dict(SeqIO.parse(genome_path, "fasta"))
+
 
 def parse_bed(bed_path):
-    print(f"Parsing BED file {bed_path}...")
     intervals = []
-    with open(bed_path, 'r') as f:
+    with open(bed_path) as f:
         for line in f:
-            if line.strip():
-                parts = line.strip().split('\t')
-                chrom = parts[0]
-                start = int(parts[1])
-                end = int(parts[2])
-                name = parts[3]
-                intervals.append((chrom, start, end, name))
+            if line.strip() and not line.startswith(("#", "track", "browser")):
+                parts = line.rstrip("\n").split("\t")
+                intervals.append((parts[0], int(parts[1]), int(parts[2]), parts[3]))
     return intervals
 
-def mutate_sequence(sequence, mutation_rate=0.01):
-    """Introduces random SNVs into the sequence."""
-    seq_list = list(sequence)
-    bases = ['A', 'C', 'G', 'T']
+
+def mutate_sequence(sequence, rng, mutation_rate=0.01):
+    """Introduce random SNVs; returns (new_sequence, [(pos, ref, alt), ...])."""
+    seq = list(sequence)
     mutations = []
-    
-    for i in range(len(seq_list)):
-        if random.random() < mutation_rate:
-            original_base = seq_list[i]
-            possible_bases = [b for b in bases if b != original_base]
-            new_base = random.choice(possible_bases)
-            seq_list[i] = new_base
-            mutations.append((i, original_base, new_base))
-            
-    return "".join(seq_list), mutations
+    for i, ref in enumerate(seq):
+        if rng.random() < mutation_rate:
+            alt = rng.choice([b for b in BASES if b != ref])
+            seq[i] = alt
+            mutations.append((i, ref, alt))
+    return "".join(seq), mutations
 
-def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix, non_uniform=False, thermal_bias=None):
-    r1_records = []
-    r2_records = []
-    
-    total_reads = 0
-    
-    for chrom, start, end, name in intervals:
-        if chrom not in genome_dict:
-            print(f"Warning: Chromosome {chrom} not found in genome. Skipping {name}.")
-            continue
-            
-        ref_seq = str(genome_dict[chrom].seq[start:end])
-        
-        # Inject mutations to simulate biological variation
-        mutated_seq, mutations = mutate_sequence(ref_seq, mutation_rate=0.01)
-        if mutations:
-           print(f"   -> Injected {len(mutations)} SNVs into {name}")
 
-        # Determine num_pairs for this amplicon
-        current_coverage = coverage
-        
-        if thermal_bias:
-            # Simple simulation: amplicons have an 'optimal' temp around 62C
-            # Coverage drops off as thermal_bias moves away from optimal
-            # We'll use the amplicon name or a hash to vary the 'optimal' temp slightly per-target
-            target_opt = 62.0 + (hash(name) % 5) - 2.5 # 60 to 65C range
-            diff = abs(thermal_bias - target_opt)
-            # Scaling factor: 1.0 at opt, drops by 0.2 for every degree of diff
-            scaling = max(0.05, 1.0 - (diff * 0.2))
-            current_coverage = int(coverage * scaling)
+def add_errors(read, rng, error_rate):
+    if error_rate <= 0:
+        return read
+    out = list(read)
+    for i, ref in enumerate(out):
+        if rng.random() < error_rate:
+            out[i] = rng.choice([b for b in BASES if b != ref])
+    return "".join(out)
 
-        if non_uniform:
-            # Randomly vary coverage between 10% and 200% of target
-            num_pairs = int(current_coverage * random.uniform(0.1, 2.0))
-        else:
-            num_pairs = current_coverage
-        
-        print(f"   -> Generating {num_pairs} pairs for {name} (Bias: {thermal_bias}C)")
-        
-        for i in range(num_pairs):
-            # R1: Forward strand, 5' end
-            r1_seq = mutated_seq[:read_len]
-            if len(r1_seq) < read_len:
-                r1_seq = r1_seq.ljust(read_len, 'N')
-                
-            # R2: Reverse strand, 3' end (reverse complement)
-            r2_seq_template = mutated_seq[-read_len:]
-            if len(r2_seq_template) < read_len:
-                r2_seq_template = r2_seq_template.rjust(read_len, 'N')
-            
-            r2_seq = str(Seq(r2_seq_template).reverse_complement())
-            qual = "I" * read_len
-            header = f"SimonSimRead:{total_reads}:{name}"
-            
-            r1_records.append(f"@{header} 1:N:0:1\n{r1_seq}\n+\n{qual}\n")
-            r2_records.append(f"@{header} 2:N:0:1\n{r2_seq}\n+\n{qual}\n")
-            total_reads += 1
 
+def stable_offset(name):
+    """Per-target offset in [-2.5, 2.5). crc32 is stable across runs (hash() is not)."""
+    return (zlib.crc32(name.encode()) % 5) - 2.5
+
+
+def pairs_for_amplicon(name, coverage, rng, non_uniform, thermal_bias):
+    current = coverage
+    if thermal_bias is not None:
+        target_opt = 62.0 + stable_offset(name)
+        scaling = max(0.05, 1.0 - abs(thermal_bias - target_opt) * 0.2)
+        current = int(coverage * scaling)
+    if non_uniform:
+        return int(current * rng.uniform(0.1, 2.0))
+    return current
+
+
+def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix,
+                           non_uniform=False, thermal_bias=None, seed=0,
+                           mutation_rate=0.01, error_rate=0.001):
+    rng = random.Random(seed)
+    qual = "I" * read_len
     r1_filename = f"{output_prefix}_R1.fastq.gz"
     r2_filename = f"{output_prefix}_R2.fastq.gz"
+    total = 0
 
-    print(f"Writing {len(r1_records)} read pairs to {r1_filename} and {r2_filename}...")
+    with gzip.open(r1_filename, "wt") as f1, gzip.open(r2_filename, "wt") as f2:
+        for chrom, start, end, name in intervals:
+            if chrom not in genome_dict:
+                print(f"Warning: {chrom} not in genome. Skipping {name}.")
+                continue
+            ref_seq = str(genome_dict[chrom].seq[start:end]).upper()
+            if not ref_seq:
+                print(f"Warning: empty interval for {name}. Skipping.")
+                continue
+            amplicon, muts = mutate_sequence(ref_seq, rng, mutation_rate)
+            n_pairs = pairs_for_amplicon(name, coverage, rng, non_uniform, thermal_bias)
+            print(f"   -> {n_pairs} pairs for {name} ({len(muts)} SNVs)")
 
-    with gzip.open(r1_filename, 'wt') as f1, gzip.open(r2_filename, 'wt') as f2:
-        for r1, r2 in zip(r1_records, r2_records):
-            f1.write(r1)
-            f2.write(r2)
+            for _ in range(n_pairs):
+                r1 = add_errors(amplicon[:read_len].ljust(read_len, "N"), rng, error_rate)
+                tail = amplicon[-read_len:].rjust(read_len, "N")
+                r2 = add_errors(str(Seq(tail).reverse_complement()), rng, error_rate)
+                header = f"SimRead:{total}:{name}"
+                f1.write(f"@{header} 1:N:0:1\n{r1}\n+\n{qual}\n")
+                f2.write(f"@{header} 2:N:0:1\n{r2}\n+\n{qual}\n")
+                total += 1
+
+    print(f"Wrote {total} read pairs to {r1_filename} and {r2_filename}")
+    return total
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate simulated FASTQ data from BED intervals.")
-    parser.add_argument('--genome', required=True, help="Path to reference genome")
-    parser.add_argument('--bed', required=True, help="Path to BED file")
-    parser.add_argument('--output-dir', required=True, help="Directory to save FASTQ files")
-    parser.add_argument('--sample-name', default="Simulated_Sample", help="Sample name for output files")
-    parser.add_argument('--coverage', type=int, default=100, help="Number of read pairs per amplicon")
-    parser.add_argument('--non-uniform', action='store_true', help="Introduce coverage non-uniformity")
-    parser.add_argument('--thermal-bias', type=float, help="Simulated annealing temperature (C). Affects coverage of amplicons based on proximity to 60C.")
-    
+    parser.add_argument("--genome", required=True)
+    parser.add_argument("--bed", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--sample-name", default="Simulated_Sample")
+    parser.add_argument("--coverage", type=int, default=100, help="Read pairs per amplicon")
+    parser.add_argument("--read-length", type=int, default=150)
+    parser.add_argument("--non-uniform", action="store_true")
+    parser.add_argument("--thermal-bias", type=float,
+                        help="Simulated annealing temperature (C); coverage falls off away from ~62C")
+    parser.add_argument("--mutation-rate", type=float, default=0.01, help="Per-base SNV rate per amplicon")
+    parser.add_argument("--error-rate", type=float, default=0.001, help="Per-base sequencing error rate")
+    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
-    
-    if not os.path.exists(args.output_dir):
-        os.makedirs(args.output_dir)
-        
-    output_prefix = os.path.join(args.output_dir, args.sample_name)
-    
-    genome = load_genome(args.genome)
-    intervals = parse_bed(args.bed)
-    
-    generate_fastq_records(intervals, genome, args.coverage, 150, output_prefix, 
-                           non_uniform=args.non_uniform, thermal_bias=args.thermal_bias)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    generate_fastq_records(parse_bed(args.bed), load_genome(args.genome), args.coverage,
+                           args.read_length, os.path.join(args.output_dir, args.sample_name),
+                           non_uniform=args.non_uniform, thermal_bias=args.thermal_bias,
+                           seed=args.seed, mutation_rate=args.mutation_rate,
+                           error_rate=args.error_rate)
     print("Simulation complete.")
+
 
 if __name__ == "__main__":
     main()

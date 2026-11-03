@@ -1,14 +1,13 @@
 #!/usr/bin/env nextflow
 
-nextflow.enable.dsl = 2
-
 // --- Input Parameters ---
-params.reads = "$baseDir/../raw_data/*_R{1,2}.fastq.gz"
-params.genome = "$baseDir/../common_refs/*.cleaned.fna"
-params.primers = "$baseDir/../design/output/final_primers_pool_1_trimming.fasta" 
-params.bed = "$baseDir/../design/output/final_primers_pool_1.bed"
-params.outdir = "$baseDir/../results"
+params.reads = "${projectDir}/../raw_data/*_R{1,2}.fastq.gz"
+params.genome = "${projectDir}/../common_refs/*.cleaned.fna"
+params.primers = "${projectDir}/../design/output/final_primers_pool_1_trimming.fasta" 
+params.bed = "${projectDir}/../design/output/final_primers_pool_1.bed"
+params.outdir = "${projectDir}/../results"
 params.mode = 'germline' // choices: germline, somatic
+params.min_primer_overlap = 15 // cutadapt -O: min bases of tail+primer that must match
 
 log.info """
 A M P L I C O N   S E Q   P I P E L I N E
@@ -59,29 +58,34 @@ process TRIM_PRIMERS {
 
     stub:
     """
-    touch ${sample_id}_R1.trimmed.fastq.gz ${sample_id}_cutadapt.log
+    touch ${sample_id}_R1.trimmed.fastq.gz ${sample_id}_R2.trimmed.fastq.gz ${sample_id}_cutadapt.log
     """
 
-    // Using -g (5' adapter) for R1 and -G (5' adapter) for R2
-    // Assuming primers are anchored at the 5' end.
+    // The trimming FASTA holds <target>_F (tail+fwd primer) and <target>_R
+    // (tail+rev primer). R1 starts with a forward primer and R2 with a reverse
+    // primer, so each read is only searched for its own orientation's primers.
+    // Reads start inside the tail+primer, so partial 5' matches are expected;
+    // -O guards against spurious short matches.
     script:
+    def common = "--discard-untrimmed -O ${params.min_primer_overlap} -j ${task.cpus}"
     if (reads instanceof List && reads.size() == 2) {
         """
-        cutadapt \
-        -g file:${primers} \
-        -G file:${primers} \
-        -o ${sample_id}_R1.trimmed.fastq.gz \
-        -p ${sample_id}_R2.trimmed.fastq.gz \
-        --discard-untrimmed \
-        ${reads[0]} ${reads[1]} > ${sample_id}_cutadapt.log
+        awk '/^>/{p=(\$0 ~ /_F\$/)} p' ${primers} > fwd_primers.fa
+        awk '/^>/{p=(\$0 ~ /_R\$/)} p' ${primers} > rev_primers.fa
+        cutadapt ${common} \
+            -g file:fwd_primers.fa \
+            -G file:rev_primers.fa \
+            -o ${sample_id}_R1.trimmed.fastq.gz \
+            -p ${sample_id}_R2.trimmed.fastq.gz \
+            ${reads[0]} ${reads[1]} > ${sample_id}_cutadapt.log
         """
     } else {
         """
-        cutadapt \
-        -g file:${primers} \
-        -o ${sample_id}.trimmed.fastq.gz \
-        --discard-untrimmed \
-        ${reads} > ${sample_id}_cutadapt.log
+        awk '/^>/{p=(\$0 ~ /_F\$/)} p' ${primers} > fwd_primers.fa
+        cutadapt ${common} \
+            -g file:fwd_primers.fa \
+            -o ${sample_id}.trimmed.fastq.gz \
+            ${reads} > ${sample_id}_cutadapt.log
         """
     }
 }
@@ -124,28 +128,29 @@ process ALIGN {
     path genome
 
     output:
-    tuple val(sample_id), path("*.bam"), emit: bam
+    tuple val(sample_id), path("*.sorted.bam"), emit: bam
 
     stub:
     """
-    touch ${sample_id}.bam
+    touch ${sample_id}.sorted.bam
     """
 
     script:
     if (reads instanceof List && reads.size() == 2) {
         """
-        bwa mem -t 4 -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads[0]} ${reads[1]} | \
-        samtools view -b - > ${sample_id}.bam
+        bwa mem -t ${task.cpus} -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads[0]} ${reads[1]} | \
+        samtools sort -@ ${task.cpus} -o ${sample_id}.sorted.bam -
         """
     } else {
         """
-        bwa mem -t 4 -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads} | \
-        samtools view -b - > ${sample_id}.bam
+        bwa mem -t ${task.cpus} -R '@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA' $genome ${reads} | \
+        samtools sort -@ ${task.cpus} -o ${sample_id}.sorted.bam -
         """
     }
 }
 
 process SORT_INDEX_BAM {
+    // BAMs arrive coordinate-sorted from ALIGN; this step only indexes them.
     tag "$sample_id"
     publishDir "${params.outdir}/bams", mode: 'copy'
 
@@ -153,17 +158,16 @@ process SORT_INDEX_BAM {
     tuple val(sample_id), path(bam)
 
     output:
-    tuple val(sample_id), path("*.sorted.bam"), path("*.sorted.bam.bai"), emit: sorted_bam
+    tuple val(sample_id), path(bam), path("*.sorted.bam.bai"), emit: sorted_bam
 
     stub:
     """
-    touch ${sample_id}.sorted.bam ${sample_id}.sorted.bam.bai
+    touch ${sample_id}.sorted.bam.bai
     """
 
     script:
     """
-    samtools sort -o ${sample_id}.sorted.bam $bam
-    samtools index ${sample_id}.sorted.bam
+    samtools index $bam
     """
 }
 
@@ -222,7 +226,6 @@ process MARK_DUPLICATES {
 process PICARD_METRICS {
     tag "$sample_id"
     publishDir "${params.outdir}/qc/picard", mode: 'copy'
-    errorStrategy 'ignore' // Non-critical if headers differ, though we try to fix
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -249,8 +252,9 @@ process PICARD_METRICS {
     R=$fasta I=$bam O=${sample_id}_alignment_metrics.txt
 
     # 2. Insert Size Metrics
+    # Insert size needs paired reads; tolerate its absence (e.g. single-end data)
     picard CollectInsertSizeMetrics \
-    I=$bam O=${sample_id}_insert_size_metrics.txt H=${sample_id}_insert_size_histogram.pdf
+    I=$bam O=${sample_id}_insert_size_metrics.txt H=${sample_id}_insert_size_histogram.pdf || true
 
     picard CollectTargetedPcrMetrics \
     I=$bam O=${sample_id}_pcr_metrics.txt \
@@ -316,7 +320,7 @@ process MUTECT2_CALLING {
     -R $fasta \
     -I $bam \
     -O ${sample_id}.somatic.vcf.gz \
-    --native-pair-hmm-threads 4
+    --native-pair-hmm-threads ${task.cpus}
     """
 }
 

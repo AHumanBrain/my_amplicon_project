@@ -1,7 +1,7 @@
 import logging
 import json
 import argparse
-from pathlib import Path
+import html as htmllib
 
 # --- Modular Imports ---
 from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
@@ -103,6 +103,7 @@ def generate_html_report(picard_metrics, per_target_stats, output_file, feedback
 """
     
     # Sort by coverage ascending to show problems first
+    per_target_stats = calculate_relative_coverage(per_target_stats, mean_overall)
     sorted_stats = sorted(per_target_stats, key=lambda x: x['mean_coverage'])
     
     max_cov = max([s['mean_coverage'] for s in sorted_stats]) if sorted_stats else 1
@@ -111,7 +112,7 @@ def generate_html_report(picard_metrics, per_target_stats, output_file, feedback
 
     for stat in sorted_stats:
         cov = stat['mean_coverage']
-        rel_mean = cov / mean_overall if mean_overall > 0 else 0
+        rel_mean = stat['rel_mean']
         
         # Calculation for balancing
         # If rel_mean is 0.5, we need 2x concentration to bring it to mean
@@ -139,7 +140,7 @@ def generate_html_report(picard_metrics, per_target_stats, output_file, feedback
 
         html += f"""
             <tr>
-                <td>{stat['name']}</td>
+                <td>{htmllib.escape(stat['name'])}</td>
                 <td>{cov:.1f}x</td>
                 <td>{rel_mean:.2f}x</td>
                 <td>{adj_factor:.2f}x</td>
@@ -167,7 +168,7 @@ def generate_html_report(picard_metrics, per_target_stats, output_file, feedback
         color = "low" if width < 20 else ("med" if width < 50 else "high")
         html += f"""
         <div class="bar-row">
-            <div class="bar-label">{stat['name']}</div>
+            <div class="bar-label">{htmllib.escape(stat['name'])}</div>
             <div class="bar-outer">
                 <div class="bar-inner {color}" style="width: {width}%"></div>
             </div>

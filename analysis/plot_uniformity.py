@@ -1,9 +1,9 @@
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import numpy as np
 import argparse
 import logging
-from pathlib import Path
 
 # --- Modular Imports ---
 from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
@@ -24,7 +24,6 @@ def plot_uniformity(pcr_metrics_path, target_cov_path, output_path, sample_name)
         return
 
     # Convert to DataFrame for easier plotting
-    df = pd.DataFrame(targets_list)
     df = pd.DataFrame(calculate_relative_coverage(targets_list, global_mean))
     
     # Calculate Uniformity Metric: % of amplicons > 0.2x mean
