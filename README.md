@@ -465,6 +465,22 @@ python design.py \
 
 ---
 
+## ✅ Verified Behaviour & Known Limitations
+
+Verified end to end with real BLAST+, BWA, Picard, GATK and Cutadapt (conda env from `environment.yml`):
+
+* **Design**: the 21-gene housekeeping panel designs in ~7 s and packs into 1 pool; an independent BLAST re-check found every primer has exactly one perfect genomic hit. The 100-gene `stress_test_100.txt` list yields 92 designed targets in 3 pools (62/27/3) with the salt-calibrated dimer model.
+* **Pipeline**: simulated reads from the housekeeping panel trim (99.8 % retained), align, and produce metrics, a coverage report, a uniformity plot, MultiQC and a GVCF.
+* **Variant recall (simulated, 42 injected SNVs)**: 27 called, 0 false positives. 10 of the 15 misses fall *inside primer-binding sites*, which are trimmed by design (primer-derived bases cannot report template variants). The remaining 5 are in the amplicon interior and are not yet explained.
+
+Known limitations:
+
+* **Short genes**: the amplicon must fit inside the gene (default minimum 100 bp), so genes shorter than that (e.g. `thrL`, `sokC`) fail design. Designing on gene ± flank would fix this.
+* **Duplicates**: amplicon reads share start positions, so >99 % of pairs are flagged as duplicates. Variant calling and coverage therefore use the sorted (not duplicate-marked) BAM; `MARK_DUPLICATES` is informational only.
+* **Specificity**: BLAST screening counts only exact full-length matches; near-matches with 3′ mismatches are not scored.
+
+---
+
 ## ❓ Frequently Asked Questions
 
 **Q: Why does the script output multiple primer pool files?**  
