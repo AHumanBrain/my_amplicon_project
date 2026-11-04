@@ -2,12 +2,10 @@
 
 // --- Input Parameters ---
 params.reads = "${projectDir}/../raw_data/*_R{1,2}.fastq.gz"
-params.genome = "${projectDir}/../common_refs/*.cleaned.fna"
-params.primers = "${projectDir}/../design/output/final_primers_pool_1_trimming.fasta" 
-params.bed = "${projectDir}/../design/output/final_primers_pool_1.bed"
+params.genome = "${projectDir}/../common_refs/ecoli_genome.fna"
+params.primers = "${projectDir}/../design/output/panel_pool_1_trimming.fasta"
+params.bed = "${projectDir}/../design/output/panel_pool_1.bed"
 params.outdir = "${projectDir}/../results"
-params.mode = 'germline' // choices: germline, somatic
-params.min_primer_overlap = 15 // cutadapt -O: min bases of tail+primer that must match
 // HaplotypeCaller assembly settings tuned for amplicon data (see README section 4):
 // every read starts at the primer, so SNVs near read ends have no left/right
 // anchor and clustered SNVs defeat the default k-mers (10,25).
@@ -21,7 +19,6 @@ reads        : ${params.reads}
 primers      : ${params.primers}
 targets (BED): ${params.bed}
 outdir       : ${params.outdir}
-mode         : ${params.mode}
 """
 
 // --- Processes ---
@@ -65,20 +62,18 @@ process TRIM_PRIMERS {
     touch ${sample_id}_R1.trimmed.fastq.gz ${sample_id}_R2.trimmed.fastq.gz ${sample_id}_cutadapt.log
     """
 
-    // The trimming FASTA holds <target>_F (tail+fwd primer) and <target>_R
-    // (tail+rev primer). R1 starts with a forward primer and R2 with a reverse
-    // primer, so each read is only searched for its own orientation's primers.
-    // Reads start inside the tail+primer, so partial 5' matches are expected;
-    // -O guards against spurious short matches.
+    // The trimming FASTA holds <target>_F and <target>_R oligos. Reads begin at the
+    // primer, so each primer is matched anchored at the 5' end (^file:), and R1 is only
+    // searched for forward primers and R2 for reverse primers.
     script:
-    def common = "--discard-untrimmed -O ${params.min_primer_overlap} -j ${task.cpus}"
+    def common = "--discard-untrimmed -j ${task.cpus}"
     if (reads instanceof List && reads.size() == 2) {
         """
         awk '/^>/{p=(\$0 ~ /_F\$/)} p' ${primers} > fwd_primers.fa
         awk '/^>/{p=(\$0 ~ /_R\$/)} p' ${primers} > rev_primers.fa
         cutadapt ${common} \
-            -g file:fwd_primers.fa \
-            -G file:rev_primers.fa \
+            -g ^file:fwd_primers.fa \
+            -G ^file:rev_primers.fa \
             -o ${sample_id}_R1.trimmed.fastq.gz \
             -p ${sample_id}_R2.trimmed.fastq.gz \
             ${reads[0]} ${reads[1]} > ${sample_id}_cutadapt.log
@@ -87,7 +82,7 @@ process TRIM_PRIMERS {
         """
         awk '/^>/{p=(\$0 ~ /_F\$/)} p' ${primers} > fwd_primers.fa
         cutadapt ${common} \
-            -g file:fwd_primers.fa \
+            -g ^file:fwd_primers.fa \
             -o ${sample_id}.trimmed.fastq.gz \
             ${reads} > ${sample_id}_cutadapt.log
         """
@@ -198,35 +193,6 @@ process PREP_INTERVALS {
     """
 }
 
-process MARK_DUPLICATES {
-    tag "$sample_id"
-    publishDir "${params.outdir}/bams", mode: 'copy'
-
-    input:
-    tuple val(sample_id), path(bam), path(bai)
-
-    output:
-    tuple val(sample_id), path("${sample_id}.marked.bam"), path("${sample_id}.marked.bai"), emit: marked_bam
-    path "${sample_id}.mark_dups_metrics.txt", emit: metrics
-
-    stub:
-    """
-    touch ${sample_id}.marked.bam ${sample_id}.marked.bai ${sample_id}.mark_dups_metrics.txt
-    """
-
-    script:
-    """
-    picard MarkDuplicates \
-    I=$bam \
-    O=${sample_id}.marked.bam \
-    M=${sample_id}.mark_dups_metrics.txt \
-    CREATE_INDEX=true \
-    VALIDATION_STRINGENCY=SILENT \
-    TAGGING_POLICY=All \
-    ASSUME_SORTED=true
-    """
-}
-
 process PICARD_METRICS {
     tag "$sample_id"
     publishDir "${params.outdir}/qc/picard", mode: 'copy'
@@ -300,56 +266,6 @@ process GERMLINE_CALLING {
     """
 }
 
-process MUTECT2_CALLING {
-    tag "$sample_id"
-    publishDir "${params.outdir}/variants/somatic", mode: 'copy'
-
-    input:
-    tuple val(sample_id), path(bam), path(bai)
-    path fasta
-    path fai
-    path dict
-
-    output:
-    path "${sample_id}.somatic.vcf.gz", emit: vcf
-
-    stub:
-    """
-    touch ${sample_id}.somatic.vcf.gz
-    """
-
-    // Mutect2 in tumor-only mode for low-frequency variants
-    script:
-    """
-    gatk Mutect2 \
-    -R $fasta \
-    -I $bam \
-    -O ${sample_id}.somatic.vcf.gz \
-    --native-pair-hmm-threads ${task.cpus}
-    """
-}
-
-process COVERAGE_TRACKS {
-    tag "$sample_id"
-    publishDir "${params.outdir}/coverage", mode: 'copy'
-
-    input:
-    tuple val(sample_id), path(bam), path(bai)
-
-    output:
-    path "*.bw"
-
-    stub:
-    """
-    touch ${sample_id}.bw
-    """
-
-    script:
-    """
-    bamCoverage -b $bam -o ${sample_id}.bw
-    """
-}
-
 process MULTIQC {
     publishDir "${params.outdir}/multiqc", mode: 'copy'
 
@@ -370,9 +286,9 @@ process MULTIQC {
     """
 }
 
-process PLOT_COVERAGE {
+process REPORT {
     tag "$sample_id"
-    publishDir "${params.outdir}/coverage", mode: 'copy'
+    publishDir "${params.outdir}/report", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -380,117 +296,59 @@ process PLOT_COVERAGE {
     path target_coverage
 
     output:
-    path "${sample_id}_coverage_report.html", emit: html
     path "${sample_id}_balancing_feedback.json", emit: json
+    path "${sample_id}_target_summary.tsv", emit: tsv
     path "${sample_id}_uniformity.png", emit: png
 
     stub:
     """
-    touch ${sample_id}_coverage_report.html ${sample_id}_balancing_feedback.json ${sample_id}_uniformity.png
+    touch ${sample_id}_balancing_feedback.json ${sample_id}_target_summary.tsv ${sample_id}_uniformity.png
     """
 
     script:
     """
-    python ${projectDir}/plot_coverage.py \
-    -m $pcr_metrics \
-    -c $target_coverage \
-    -o ${sample_id}_coverage_report.html \
-    -j ${sample_id}_balancing_feedback.json
-
-    python ${projectDir}/plot_uniformity.py \
-    -m $pcr_metrics \
-    -c $target_coverage \
-    -o ${sample_id}_uniformity.png \
-    -s "${sample_id}"
+    python ${projectDir}/balance.py -m $pcr_metrics -c $target_coverage \\
+        -j ${sample_id}_balancing_feedback.json -t ${sample_id}_target_summary.tsv
+    python ${projectDir}/plot_uniformity.py -m $pcr_metrics -c $target_coverage \\
+        -o ${sample_id}_uniformity.png -s "${sample_id}"
     """
 }
 
 // --- Workflow ---
 
 workflow {
-    // 1. Channel for reads (auto-detects SE/PE)
-    // We try to match pairs first, then individuals
-    Channel
-        .fromFilePairs(params.reads, size: -1) { file -> file.name.replaceAll(/_R[12].*/, '') }
-        .set { read_pairs_ch }
+    read_pairs_ch = Channel.fromFilePairs(params.reads, size: -1) { file -> file.name.replaceAll(/_R[12].*/, '') }
 
-    // Reference inputs must be real file objects (a bare relative path string is
-    // not a valid `path` value). fromPath also accepts globs; .first() makes a
-    // value channel so every sample can reuse it.
+    // Reference inputs must be file objects; .first() makes value channels reused by every sample.
     genome_ch  = Channel.fromPath(params.genome,  checkIfExists: true).first()
     bed_ch     = Channel.fromPath(params.bed,     checkIfExists: true).first()
     primers_ch = Channel.fromPath(params.primers, checkIfExists: true).first()
 
-    // 2. Build Reference Indices (runs once)
     BUILD_INDICES(genome_ch)
-    
-    // 3. Prepare Intervals (runs once)
     PREP_INTERVALS(bed_ch, BUILD_INDICES.out.dict)
-
-    // 4. Raw QC
     FASTQC(read_pairs_ch)
-
-    // 5. Trim Primers
     TRIM_PRIMERS(read_pairs_ch, primers_ch)
-
-    // 6. Align
     ALIGN(TRIM_PRIMERS.out.trimmed_reads, BUILD_INDICES.out.bwa_index, genome_ch)
-
-    // 7. Sort & Index
     SORT_INDEX_BAM(ALIGN.out.bam)
 
-    // 8. Mark Duplicates (Informational)
-    MARK_DUPLICATES(SORT_INDEX_BAM.out.sorted_bam)
-
-    // 9. Metrics & Visualization
     PICARD_METRICS(
-        SORT_INDEX_BAM.out.sorted_bam, 
-        BUILD_INDICES.out.fasta, 
-        BUILD_INDICES.out.fai,
-        BUILD_INDICES.out.dict,
+        SORT_INDEX_BAM.out.sorted_bam,
+        BUILD_INDICES.out.fasta, BUILD_INDICES.out.fai, BUILD_INDICES.out.dict,
         PREP_INTERVALS.out.interval_list
     )
-    
-    COVERAGE_TRACKS(SORT_INDEX_BAM.out.sorted_bam)
 
-    // 10. Variant Calling (Conditional)
-    // NOTE: amplicon reads all start at the primer, so >99% of pairs look like
-    // duplicates. GATK drops duplicate-flagged reads by default, which would
-    // leave almost no coverage. Call on the sorted (not duplicate-marked) BAM;
-    // MARK_DUPLICATES is informational only.
-    if (params.mode == 'somatic') {
-        MUTECT2_CALLING(
-            SORT_INDEX_BAM.out.sorted_bam, 
-            BUILD_INDICES.out.fasta, 
-            BUILD_INDICES.out.fai, 
-            BUILD_INDICES.out.dict
-        )
-    } else {
-        GERMLINE_CALLING(
-            SORT_INDEX_BAM.out.sorted_bam, 
-            BUILD_INDICES.out.fasta, 
-            BUILD_INDICES.out.fai, 
-            BUILD_INDICES.out.dict
-        )
-    }
-
-    // 11. Coverage Report (Balancing Recommendations)
-    PLOT_COVERAGE(
+    // Variants are called on the sorted BAM, NOT a duplicate-marked one: amplicon reads share
+    // start positions, so GATK's default duplicate filter would discard nearly everything.
+    GERMLINE_CALLING(
         SORT_INDEX_BAM.out.sorted_bam,
-        PICARD_METRICS.out.pcr_metrics,
-        PICARD_METRICS.out.target_coverage
+        BUILD_INDICES.out.fasta, BUILD_INDICES.out.fai, BUILD_INDICES.out.dict
     )
 
-    // 12. Aggregate Report
-    // Mix all QC outputs into one channel for MultiQC
+    REPORT(SORT_INDEX_BAM.out.sorted_bam, PICARD_METRICS.out.pcr_metrics, PICARD_METRICS.out.target_coverage)
+
     FASTQC.out.zip
-        .mix(TRIM_PRIMERS.out.log)
-        .mix(PICARD_METRICS.out.all_metrics)
-        .mix(PLOT_COVERAGE.out.html)
-        .mix(PLOT_COVERAGE.out.png)
-        .mix(MARK_DUPLICATES.out.metrics)
+        .mix(TRIM_PRIMERS.out.log, PICARD_METRICS.out.all_metrics, REPORT.out.png)
         .collect()
         .set { multiqc_inputs }
-
     MULTIQC(multiqc_inputs)
 }

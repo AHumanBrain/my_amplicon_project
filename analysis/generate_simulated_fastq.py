@@ -6,7 +6,6 @@ import argparse
 import gzip
 import os
 import random
-import zlib
 
 from Bio import SeqIO
 from Bio.Seq import Seq
@@ -51,24 +50,13 @@ def add_errors(read, rng, error_rate):
     return "".join(out)
 
 
-def stable_offset(name):
-    """Per-target offset in [-2.5, 2.5). crc32 is stable across runs (hash() is not)."""
-    return (zlib.crc32(name.encode()) % 5) - 2.5
-
-
-def pairs_for_amplicon(name, coverage, rng, non_uniform, thermal_bias):
-    current = coverage
-    if thermal_bias is not None:
-        target_opt = 62.0 + stable_offset(name)
-        scaling = max(0.05, 1.0 - abs(thermal_bias - target_opt) * 0.2)
-        current = int(coverage * scaling)
-    if non_uniform:
-        return int(current * rng.uniform(0.1, 2.0))
-    return current
+def pairs_for_amplicon(coverage, rng, non_uniform):
+    """Read pairs for one amplicon; --non-uniform scales coverage by U(0.1, 2.0)."""
+    return int(coverage * rng.uniform(0.1, 2.0)) if non_uniform else coverage
 
 
 def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix,
-                           non_uniform=False, thermal_bias=None, seed=0,
+                           non_uniform=False, seed=0,
                            mutation_rate=0.01, error_rate=0.001):
     rng = random.Random(seed)
     qual = "I" * read_len
@@ -88,7 +76,7 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
                 continue
             amplicon, muts = mutate_sequence(ref_seq, rng, mutation_rate)
             truth.extend((chrom, start + pos + 1, ref, alt, name) for pos, ref, alt in muts)
-            n_pairs = pairs_for_amplicon(name, coverage, rng, non_uniform, thermal_bias)
+            n_pairs = pairs_for_amplicon(coverage, rng, non_uniform)
             print(f"   -> {n_pairs} pairs for {name} ({len(muts)} SNVs)")
 
             for _ in range(n_pairs):
@@ -119,8 +107,6 @@ def main():
     parser.add_argument("--coverage", type=int, default=100, help="Read pairs per amplicon")
     parser.add_argument("--read-length", type=int, default=150)
     parser.add_argument("--non-uniform", action="store_true")
-    parser.add_argument("--thermal-bias", type=float,
-                        help="Simulated annealing temperature (C); coverage falls off away from ~62C")
     parser.add_argument("--mutation-rate", type=float, default=0.01, help="Per-base SNV rate per amplicon")
     parser.add_argument("--error-rate", type=float, default=0.001, help="Per-base sequencing error rate")
     parser.add_argument("--seed", type=int, default=0)
@@ -129,7 +115,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     generate_fastq_records(parse_bed(args.bed), load_genome(args.genome), args.coverage,
                            args.read_length, os.path.join(args.output_dir, args.sample_name),
-                           non_uniform=args.non_uniform, thermal_bias=args.thermal_bias,
+                           non_uniform=args.non_uniform,
                            seed=args.seed, mutation_rate=args.mutation_rate,
                            error_rate=args.error_rate)
     print("Simulation complete.")

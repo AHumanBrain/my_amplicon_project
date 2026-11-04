@@ -24,7 +24,7 @@ jobs:
           cache-dependency-path: environment.yml
 
       - name: Install dependencies
-        run: pip install biopython primer3-py tqdm pandas matplotlib numpy pytest pyflakes
+        run: pip install biopython primer3-py tqdm matplotlib numpy pytest pyflakes
 
       - name: Lint (undefined names are errors)
         run: python -m pyflakes design.py core analysis scripts
@@ -88,9 +88,9 @@ jobs:
         run: |
           R="$RUNNER_TEMP/results"
           for f in multiqc/multiqc_report.html \
-                   coverage/FixtureSample_balancing_feedback.json \
-                   coverage/FixtureSample_coverage_report.html \
-                   coverage/FixtureSample_uniformity.png \
+                   report/FixtureSample_balancing_feedback.json \
+                   report/FixtureSample_target_summary.tsv \
+                   report/FixtureSample_uniformity.png \
                    variants/germline/FixtureSample.g.vcf.gz \
                    qc/picard/FixtureSample_pcr_metrics.txt; do
             test -s "$R/$f" || { echo "missing or empty: $f"; exit 1; }

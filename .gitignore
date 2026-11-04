@@ -9,7 +9,6 @@ results/*
 # Other genomes you add there are ignored:
 common_refs/*
 !common_refs/ecoli_genome.fna
-!common_refs/ecoli_genome.cleaned.fna
 !common_refs/genomic.gff
 
 # Nextflow / Analysis
@@ -31,7 +30,6 @@ design/*.bed
 design/*.csv
 design/*.fasta
 design/*.txt
-# Curated reference outputs live in design/examples/ (tracked)
 design/ncbi_data/*
 !design/ncbi_data/.gitkeep
 
