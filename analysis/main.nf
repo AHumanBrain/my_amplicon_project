@@ -446,19 +446,23 @@ workflow {
         PREP_INTERVALS.out.interval_list
     )
     
-    COVERAGE_TRACKS(MARK_DUPLICATES.out.marked_bam) 
+    COVERAGE_TRACKS(SORT_INDEX_BAM.out.sorted_bam)
 
     // 10. Variant Calling (Conditional)
+    // NOTE: amplicon reads all start at the primer, so >99% of pairs look like
+    // duplicates. GATK drops duplicate-flagged reads by default, which would
+    // leave almost no coverage. Call on the sorted (not duplicate-marked) BAM;
+    // MARK_DUPLICATES is informational only.
     if (params.mode == 'somatic') {
         MUTECT2_CALLING(
-            MARK_DUPLICATES.out.marked_bam, 
+            SORT_INDEX_BAM.out.sorted_bam, 
             BUILD_INDICES.out.fasta, 
             BUILD_INDICES.out.fai, 
             BUILD_INDICES.out.dict
         )
     } else {
         GERMLINE_CALLING(
-            MARK_DUPLICATES.out.marked_bam, 
+            SORT_INDEX_BAM.out.sorted_bam, 
             BUILD_INDICES.out.fasta, 
             BUILD_INDICES.out.fai, 
             BUILD_INDICES.out.dict
@@ -467,7 +471,7 @@ workflow {
 
     // 11. Coverage Report (Balancing Recommendations)
     PLOT_COVERAGE(
-        MARK_DUPLICATES.out.marked_bam,
+        SORT_INDEX_BAM.out.sorted_bam,
         PICARD_METRICS.out.pcr_metrics,
         PICARD_METRICS.out.target_coverage
     )

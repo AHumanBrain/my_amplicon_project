@@ -75,6 +75,7 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
     r1_filename = f"{output_prefix}_R1.fastq.gz"
     r2_filename = f"{output_prefix}_R2.fastq.gz"
     total = 0
+    truth = []
 
     with gzip.open(r1_filename, "wt") as f1, gzip.open(r2_filename, "wt") as f2:
         for chrom, start, end, name in intervals:
@@ -86,6 +87,7 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
                 print(f"Warning: empty interval for {name}. Skipping.")
                 continue
             amplicon, muts = mutate_sequence(ref_seq, rng, mutation_rate)
+            truth.extend((chrom, start + pos + 1, ref, alt, name) for pos, ref, alt in muts)
             n_pairs = pairs_for_amplicon(name, coverage, rng, non_uniform, thermal_bias)
             print(f"   -> {n_pairs} pairs for {name} ({len(muts)} SNVs)")
 
@@ -98,7 +100,13 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
                 f2.write(f"@{header} 2:N:0:1\n{r2}\n+\n{qual}\n")
                 total += 1
 
-    print(f"Wrote {total} read pairs to {r1_filename} and {r2_filename}")
+    truth_path = f"{output_prefix}.truth.tsv"
+    with open(truth_path, "w") as t:
+        t.write("chrom\tpos\tref\talt\tamplicon\n")
+        for row in truth:
+            t.write("\t".join(map(str, row)) + "\n")
+    print(f"Wrote {total} read pairs to {r1_filename} and {r2_filename}; "
+          f"{len(truth)} injected SNVs listed in {truth_path}")
     return total
 
 
