@@ -187,8 +187,31 @@ flowchart LR
     A["Amplicon reads share start positions"] --> B["Picard: 99.7 % duplicates"]
     B --> C{"BAM given to GATK"}
     C -- "duplicate-marked" --> D["GATK drops dups: mean DP 2,<br/>17 variants (wrong)"]
-    C -- "sorted, unmarked" --> E["mean DP ~83 at calling sites:<br/>27 of 42 SNVs, 0 false positives"]
+    C -- "sorted, unmarked" --> E["mean DP ~83 at calling sites:<br/>27 of 42 SNVs with defaults,<br/>32 of 42 after tuning"]
 ```
+
+### Variant-calling tuning for amplicon data
+
+Investigating the SNVs GATK missed on simulated data (42 injected, 100 % allele fraction, 300×) found two distinct causes:
+
+```mermaid
+flowchart TD
+    M["15 SNVs missed with GATK defaults"] --> P["10: inside primer-binding sites<br/>trimmed by design, cannot be called"]
+    M --> I["5: amplicon interior"]
+    I --> R["3: clustered SNVs in recA (24 bp span)<br/>default k-mers 10,25 fail to assemble"]
+    I --> E["2: 2nd base of a read (mdh) and<br/>2nd-to-last base of a read (gyrA)<br/>no anchor flanking the SNV at read edge"]
+    R --> FX1["Fix: add k-mer 15<br/>-kmer-size 10 -kmer-size 15 -kmer-size 25"]
+    E --> FX2["Fix: --recover-all-dangling-branches<br/>--min-dangling-branch-length 1"]
+```
+
+| HaplotypeCaller config | SNVs called | False positives |
+|---|---|---|
+| defaults | 27 / 42 | 0 |
+| + k-mers 10, 15, 25 | 30 / 42 | 0 |
+| + dangling-branch recovery (**now the default**, `--hc_args`) | **32 / 42** | **0** |
+| + `--min-pruning 0` / `--force-active` | 32 / 42 | 0 (no extra gain) |
+
+The remaining 10 misses are all under primers. Scoring uses genotyped alleles; minor alleles that HaplotypeCaller lists backed by a single read are ignored. Tuned on simulated data with 0.1 % read error: re-check on real data. `--hc_args` overrides the settings; Mutect2 is unchanged.
 
 ### Outputs (`--outdir`)
 
@@ -267,21 +290,21 @@ Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml`.
 | Primer trimming | 6,289 / 6,300 pairs retained (99.8 %) |
 | Pipeline | all 12 processes succeed on panel reads and on the CI fixture |
 | Panel coverage | mean 390×, fold-80 1.32, 100 % of targets above 0.2× |
+| Variant calling (42 injected SNVs) | 32 called, 0 false positives (27 with GATK defaults); 10 misses under primers |
 | Unit tests | 27 passing |
 
 ```mermaid
 pie showData
-    title "42 injected SNVs: outcome"
-    "Called by GATK" : 27
+    title "42 injected SNVs: outcome with tuned GATK"
+    "Called by GATK" : 32
     "Missed: under a primer (trimmed by design)" : 10
-    "Missed: amplicon interior (unexplained)" : 5
 ```
 
 ---
 
 ## 9. Known limitations / open items
 
-* **5 interior SNVs are not called** although the BAM pileup shows them at 100 % allele fraction and 300×; under investigation.
+* **Variant calling is validated only on simulated reads** (identical per-amplicon reads, 0.1 % error). The GATK tuning above should be re-checked on real data; SNVs under primer sequences are invisible by design.
 * **Short genes** (below ~100 bp) cannot fit an amplicon; designing on gene ± flank would fix this.
 * **Specificity** counts only exact full-length matches; 3′-mismatch near-hits are not scored.
 * **Packing** is randomised first-fit; graph colouring or ILP might beat 3 pools on the 100-gene list.

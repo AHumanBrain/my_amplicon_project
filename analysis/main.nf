@@ -8,6 +8,10 @@ params.bed = "${projectDir}/../design/output/final_primers_pool_1.bed"
 params.outdir = "${projectDir}/../results"
 params.mode = 'germline' // choices: germline, somatic
 params.min_primer_overlap = 15 // cutadapt -O: min bases of tail+primer that must match
+// HaplotypeCaller assembly settings tuned for amplicon data (see README section 4):
+// every read starts at the primer, so SNVs near read ends have no left/right
+// anchor and clustered SNVs defeat the default k-mers (10,25).
+params.hc_args = "-kmer-size 10 -kmer-size 15 -kmer-size 25 --recover-all-dangling-branches --min-dangling-branch-length 1"
 
 log.info """
 A M P L I C O N   S E Q   P I P E L I N E
@@ -291,6 +295,7 @@ process GERMLINE_CALLING {
     -I $bam \
     -O ${sample_id}.g.vcf.gz \
     --pcr-indel-model CONSERVATIVE \
+    ${params.hc_args} \
     -ERC GVCF
     """
 }
