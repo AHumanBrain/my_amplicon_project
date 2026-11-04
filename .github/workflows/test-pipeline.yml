@@ -21,6 +21,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          cache-dependency-path: environment.yml
 
       - name: Install dependencies
         run: pip install biopython primer3-py tqdm pandas matplotlib numpy pytest pyflakes
