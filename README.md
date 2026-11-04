@@ -1,346 +1,211 @@
 # 🧬 Multiplex Amplicon Toolkit
 
-Design multiplex PCR primer panels, simulate reads, analyse sequencing data with Nextflow, and feed coverage back into pool rebalancing.
+Three things, and only these:
 
-| | |
-|---|---|
-| **Design** | `design.py` → primer3 + BLAST+ + dimer screening + pool packing |
-| **Analyse** | `analysis/main.nf` → Cutadapt, BWA, Picard, GATK, deepTools, MultiQC |
-| **Close the loop** | coverage JSON → pipetting recipe + redesign of failed targets |
-| **Stack** | conda env (`environment.yml`) or Docker (`Dockerfile`); Python 3.11, Nextflow ≥ 25.04 |
+1. **Design** multiplex PCR primer panels (primer3 + BLAST+ + dimer screening)
+2. **Pack** the primers into the fewest compatible pools
+3. **Analyse** amplicon sequencing (trim → align → coverage → variants) and feed coverage back into pool rebalancing
 
----
-
-## 1. Big picture
+Primers are plain oligos: order them from IDT, Twist, GenScript or anyone else. No adapter tails, no custom chemistry.
 
 ```mermaid
 flowchart LR
-    subgraph IN["Inputs"]
-        G["Genome FASTA"]
-        A["GFF annotation"]
-        T["Target gene list"]
-    end
-    subgraph DES["design.py"]
-        D1["primer3 candidates"] --> D2["BLAST specificity"] --> D3["Dimer filters"] --> D4["Pool packing"]
-    end
-    subgraph OUT["Design outputs"]
-        O1["*.csv order sheet"]
-        O2["*.bed amplicons"]
-        O3["*_trimming.fasta"]
-    end
-    subgraph SEQ["Data"]
-        W["Wet-lab FASTQ"]
-        S["Simulated FASTQ<br/>generate_simulated_fastq.py"]
-    end
-    subgraph NF["analysis/main.nf"]
-        N1["Trim → Align → Metrics → Variants"]
-    end
-    subgraph FB["Feedback"]
-        F1["balancing_feedback.json"]
-        F2["rebalancing_recipe.csv"]
-    end
-
-    G & A & T --> D1
-    D4 --> O1 & O2 & O3
-    O2 --> S
-    S --> N1
-    W --> N1
-    O2 & O3 --> N1
-    N1 --> F1 --> F2
-    F1 -- "REDESIGN flags" --> D1
+    G["Genome FASTA + GFF"] & T["Target genes"] --> D["design.py"]
+    D --> O["panel_order.csv<br/>pool, name, sequence"]
+    D --> B["panel_pool_N.bed / .csv<br/>panel_pool_N_trimming.fasta"]
+    O -. "order oligos, run PCR + sequence" .-> R["FASTQ reads"]
+    R & B --> N["analysis/main.nf"]
+    N --> F["report/*_balancing_feedback.json"]
+    F -- "rebalancing recipe +<br/>redesign flagged targets" --> D
 ```
 
 ---
 
-## 2. Quick start
+## 1. Quick start
 
 ```bash
-# environment (conda/micromamba) – or: docker build -t amplicon-project .
-micromamba create -y -n amplicon_pipeline -f environment.yml
-micromamba activate amplicon_pipeline
+micromamba create -y -n amplicon_pipeline -f environment.yml && micromamba activate amplicon_pipeline
 
-# 1. design a panel (21 housekeeping genes ≈ 7 s)
-python design.py --genome common_refs/ecoli_genome.cleaned.fna \
-    --gff common_refs/genomic.gff \
-    --target-file design/targets/housekeeping_genes.txt \
-    --blast-db ncbi_data/ecoli_db --output-prefix design/output/hk
+# design (21 housekeeping genes: ~40 s incl. building the BLAST db, 1 pool)
+python design.py --target-file design/targets/housekeeping_genes.txt --output-prefix design/output/hk
 
-# 2. simulate reads (also writes raw_data/HK.truth.tsv, the injected SNVs)
-python analysis/generate_simulated_fastq.py --genome common_refs/ecoli_genome.cleaned.fna \
+# optional: simulate reads (also writes raw_data/HK.truth.tsv listing injected SNVs)
+python analysis/generate_simulated_fastq.py --genome common_refs/ecoli_genome.fna \
     --bed design/output/hk_pool_1.bed --output-dir raw_data --sample-name HK --coverage 300 --seed 1
 
-# 3. analyse
-nextflow run analysis/main.nf --genome common_refs/ecoli_genome.cleaned.fna \
-    --reads "raw_data/HK_R{1,2}.fastq.gz" --bed design/output/hk_pool_1.bed \
-    --primers design/output/hk_pool_1_trimming.fasta --outdir results
+# analyse one pool
+nextflow run analysis/main.nf --reads "raw_data/HK_R{1,2}.fastq.gz" \
+    --bed design/output/hk_pool_1.bed --primers design/output/hk_pool_1_trimming.fasta --outdir results
 
-# 4. rebalance / redesign from coverage
-python design.py --feedback results/coverage/HK_balancing_feedback.json --rescue \
-    --output-prefix design/output/hk_v2
+# rebalance + redesign from coverage
+python design.py --feedback results/report/HK_balancing_feedback.json --output-prefix design/output/hk_v2
 ```
+
+Defaults: `--genome common_refs/ecoli_genome.fna`, `--gff common_refs/genomic.gff`, `--blast-db ncbi_data/ecoli_db` (built on first use).
 
 ---
 
-## 3. Module 1 – Primer design (`design.py`)
+## 2. Design (`design.py`)
 
-### 3.1 Per-target logic
+### Per-target logic
 
 ```mermaid
 flowchart TD
-    S["Extract gene sequence from GFF + FASTA"] --> P["primer3: N candidate pairs<br/>Strategy 0 ideal"]
-    P --> B["ONE blastn call per candidate batch<br/>exact full-length hits only"]
-    B --> C1["BLAST: at most 1 genomic hit<br/>fails closed on BLAST error"]
-    C1 --> C2["Self-dimer ≥ -9.0 kcal/mol"]
+    S["Gene sequence from GFF + FASTA"] --> P["primer3: N candidate pairs"]
+    P --> B["one blastn call per batch<br/>exact full-length hits only"]
+    B --> C1["≤ 1 genomic hit<br/>(BLAST errors fail closed)"]
+    C1 --> C2["self-dimer ≥ -9.0"]
     C2 --> C3["F/R heterodimer ≥ -8.0"]
-    C3 --> C4["3' end stability ≥ -6.0 both directions"]
-    C4 --> OK["Keep pair"]
-    P -. "no valid pair" .-> FB1["Fallback strategies 1 to 3<br/>longer / shorter / relaxed Tm"]
-    FB1 -. "still none" .-> R["--rescue: shift window ±25 bp, ±45 bp"]
-    R -. "still none" .-> X["Target reported as failed"]
+    C3 --> C4["3' end stability ≥ -6.0, both directions"]
+    C4 --> OK["keep pair"]
+    P -. "none pass" .-> FB["fallback strategies S1 longer / S2 shorter / S3 relaxed Tm"]
+    FB -. "none pass" .-> R["--rescue: shift window ±25, ±45 bp"]
+    R -. "none pass" .-> X["reported as failed"]
 ```
 
-### 3.2 Packing candidates into pools
+| Setting | Value |
+|---|---|
+| Reaction conditions (applied to every primer3 call) | 2.5 mM Mg²⁺, 1.2 mM dNTP, 50 mM Na⁺, 50 nM DNA (KAPA HiFi) |
+| Primer | 19–21 nt, Tm 59–61 °C (fallback 55–65), GC 40–60 % |
+| Amplicon | 150–250 bp (fallback 100–350); must fit inside the gene |
+| Dimer limits (kcal/mol) | self −9.0, heterodimer −8.0, 3′ end −6.0 (`--max-*-dg`) |
+
+### Packing into pools
 
 ```mermaid
 flowchart LR
-    M["Candidates per target<br/>sorted by strategy, then numeric rank"] --> I["Monte Carlo first-fit<br/>iteration 0 = genomic order,<br/>others shuffled with --seed"]
-    I --> Q{"Fits an existing pool?<br/>cross-dimer + overlap checks"}
-    Q -- yes --> A["Add best-ranked compatible candidate"]
-    Q -- no --> N["Open new pool"]
-    A & N --> K["Keep run with fewest pools"]
-    K --> W["Write *_pool_N.csv / .bed / _trimming.fasta / .dimers.txt"]
+    C["ranked candidates per target"] --> M["Monte Carlo first-fit<br/>iteration 0 genomic order, then shuffled (--seed)"]
+    M --> Q{"fits an existing pool?"}
+    Q -- "no amplicon overlap and no primer cross-dimer" --> A["place best-ranked compatible candidate"]
+    Q -- "no" --> N["open a new pool"]
+    A & N --> K["keep the run with fewest pools"]
 ```
 
-### 3.3 Thermodynamic model
+Overlapping amplicons (tiled designs) are never put in the same pool, so they cannot form mini-amplicons; sparse designs are packed purely on primer compatibility.
 
-| Setting | Value | Note |
-|---|---|---|
-| Mg²⁺ / dNTP / Na⁺ / DNA | 2.5 mM / 1.2 mM / 50 mM / 50 nM | KAPA HiFi; **now applied to every primer3 call** |
-| Tm window | 59–61 °C (fallback 55–65) | GC 40–60 %, 19–21 nt |
-| Amplicon | 150–250 bp (fallback 100–350) | must fit inside the gene |
-| Self-dimer / heterodimer / 3′ end | −9.0 / −8.0 / −6.0 kcal/mol | override with `--max-*-dg` |
+### Outputs (`--output-prefix`)
 
-### 3.4 Modes and key flags
+| File | Content |
+|---|---|
+| `<prefix>_order.csv` | `pool,name,sequence`: one row per oligo, ready to paste into a vendor order form |
+| `<prefix>_pool_N.csv` | per-pair details: primers, Tm, amplicon coordinates, BLAST hit counts |
+| `<prefix>_pool_N.bed` | amplicon intervals (names like `gene_amplicon_S0_3`) |
+| `<prefix>_pool_N_trimming.fasta` | primers named `<gene>_F` / `<gene>_R` for read trimming |
+| `<prefix>_failed_targets.txt` | targets that failed, or did not fit under `--force-single-pool` |
 
-```mermaid
-flowchart TD
-    A{"Arguments"} -- "--feedback" --> M3["Mode 3: rebalance + redesign<br/>(takes priority)"]
-    A -- "--target-file" --> M1["Mode 1: full design"]
-    A -- "--tail-fwd-file + --tail-rev-file" --> M2["Mode 2: add adapter tails only"]
-```
+### Flags
 
-| Flag | Default | Purpose |
+| Flag | Default | Meaning |
 |---|---|---|
 | `--num-candidates` | 25 | pairs designed per target |
-| `--monte-carlo-iters` | 20 | packing restarts |
-| `--seed` | 0 | reproducible packing |
-| `--force-single-pool` | off | one tube; targets that don't fit are **listed in the log**, not silently dropped |
-| `--force-sparse` | off | enforce zero amplicon overlap |
-| `--force-multiprime` | off | allow multi-copy loci (e.g. 16S) |
-| `--oligo-format` | `rc_tailed` | or `fwd_tailed` (+ `--add-hairpin-clamp`) |
-| `--output-prefix` | `design/output/final_primers` | |
-| `--log-file` | none | optional log file |
+| `--monte-carlo-iters` / `--seed` | 20 / 0 | packing restarts / reproducibility |
+| `--force-single-pool` | off | keep the largest compatible set; list the rest |
+| `--force-sparse` | off | never allow overlapping amplicons in one pool |
+| `--force-multiprime` | off | allow multi-copy primers (e.g. 16S) |
+| `--rescue` | off | shift the window if no pair passes |
+| `--add-hairpin-clamp` | off | experimental 5′ hairpin stem; see note below |
+
+> **Hairpin clamp:** a 5′ extension intended to suppress primer dimers. It is untested here (no wet-lab or simulation evidence it helps) and unrelated to mini-amplicons, which only pool splitting prevents. Treat as experimental.
 
 ---
 
-## 4. Module 2 – Nextflow pipeline (`analysis/main.nf`)
+## 3. Analysis (`analysis/main.nf`)
 
 ```mermaid
 flowchart TD
-    R["Reads R1/R2"] --> FQ["FASTQC"]
-    R --> TR["TRIM_PRIMERS<br/>cutadapt: R1 fwd primers, R2 rev primers"]
-    GN["Genome"] --> BI["BUILD_INDICES<br/>bwa, faidx, dict"]
-    BED["Amplicon BED"] --> PI["PREP_INTERVALS"]
+    R["reads R1/R2"] --> FQ["FASTQC"]
+    R --> TR["TRIM_PRIMERS<br/>cutadapt, 5'-anchored primers"]
+    GN["genome"] --> BI["BUILD_INDICES"]
+    BED["amplicon BED"] --> PI["PREP_INTERVALS"]
     BI --> PI
-    TR --> AL["ALIGN<br/>bwa mem piped to samtools sort"]
+    TR --> AL["ALIGN: bwa mem | samtools sort"]
     BI --> AL
-    AL --> SI["SORT_INDEX_BAM<br/>index only"]
-    SI --> MD["MARK_DUPLICATES<br/>informational"]
+    AL --> SI["SORT_INDEX_BAM"]
     SI --> PM["PICARD_METRICS"]
     PI --> PM
-    SI --> VC["GERMLINE_CALLING or MUTECT2<br/>--mode germline / somatic"]
-    SI --> BW["COVERAGE_TRACKS .bw"]
-    PM --> PC["PLOT_COVERAGE<br/>HTML + feedback JSON + uniformity PNG"]
-    FQ & TR & PM & PC & MD --> MQ["MULTIQC"]
+    SI --> VC["GERMLINE_CALLING<br/>HaplotypeCaller, amplicon-tuned"]
+    PM --> RP["REPORT<br/>feedback JSON, summary TSV, uniformity PNG"]
+    FQ & TR & PM & RP --> MQ["MULTIQC"]
 ```
 
-### Primer trimming
+**Trimming.** Reads begin at the primer, so each primer is matched anchored at the 5′ end; R1 is searched with forward primers and R2 with reverse primers. Reads that match no primer are discarded.
+
+**Variant calling uses the sorted BAM, not a duplicate-marked one.** Amplicon reads share start positions, so >99 % of pairs look like duplicates and GATK's default filter would discard almost everything (mean depth 2 vs ~390× real).
+
+**HaplotypeCaller is tuned for amplicon data** (`--hc_args`): k-mers 10/15/25 (clustered SNVs defeat the default 10/25) plus `--recover-all-dangling-branches --min-dangling-branch-length 1` (SNVs 1–2 bases from a read end have no flanking anchor).
 
 ```mermaid
 flowchart LR
-    PF["*_trimming.fasta<br/>tail+primer, names end _F / _R"] --> SPLIT["awk split"]
-    SPLIT --> FW["fwd_primers.fa"]
-    SPLIT --> RV["rev_primers.fa"]
-    FW -- "-g" --> CA["cutadapt -O 15<br/>--discard-untrimmed"]
-    RV -- "-G" --> CA
-    R1["R1"] --> CA
-    R2["R2"] --> CA
-    CA --> TRIMMED["trimmed pairs"]
+    D["GATK defaults<br/>27 / 42 SNVs"] --> K["+ k-mer 15<br/>30 / 42"] --> E["+ dangling-branch recovery<br/>32 / 42, 0 false positives"]
 ```
 
-Reads start inside tail+primer, so partial 5′ matches are expected; `--min_primer_overlap` (default 15) prevents spurious short hits.
-
-### Why variants are called on the *non*-duplicate-marked BAM
-
-```mermaid
-flowchart LR
-    A["Amplicon reads share start positions"] --> B["Picard: 99.7 % duplicates"]
-    B --> C{"BAM given to GATK"}
-    C -- "duplicate-marked" --> D["GATK drops dups: mean DP 2,<br/>17 variants (wrong)"]
-    C -- "sorted, unmarked" --> E["mean DP ~83 at calling sites:<br/>27 of 42 SNVs with defaults,<br/>32 of 42 after tuning"]
-```
-
-### Variant-calling tuning for amplicon data
-
-Investigating the SNVs GATK missed on simulated data (42 injected, 100 % allele fraction, 300×) found two distinct causes:
-
-```mermaid
-flowchart TD
-    M["15 SNVs missed with GATK defaults"] --> P["10: inside primer-binding sites<br/>trimmed by design, cannot be called"]
-    M --> I["5: amplicon interior"]
-    I --> R["3: clustered SNVs in recA (24 bp span)<br/>default k-mers 10,25 fail to assemble"]
-    I --> E["2: 2nd base of a read (mdh) and<br/>2nd-to-last base of a read (gyrA)<br/>no anchor flanking the SNV at read edge"]
-    R --> FX1["Fix: add k-mer 15<br/>-kmer-size 10 -kmer-size 15 -kmer-size 25"]
-    E --> FX2["Fix: --recover-all-dangling-branches<br/>--min-dangling-branch-length 1"]
-```
-
-| HaplotypeCaller config | SNVs called | False positives |
-|---|---|---|
-| defaults | 27 / 42 | 0 |
-| + k-mers 10, 15, 25 | 30 / 42 | 0 |
-| + dangling-branch recovery (**now the default**, `--hc_args`) | **32 / 42** | **0** |
-| + `--min-pruning 0` / `--force-active` | 32 / 42 | 0 (no extra gain) |
-
-The remaining 10 misses are all under primers. Scoring uses genotyped alleles; minor alleles that HaplotypeCaller lists backed by a single read are ignored. Tuned on simulated data with 0.1 % read error: re-check on real data. `--hc_args` overrides the settings; Mutect2 is unchanged.
-
-### Outputs (`--outdir`)
-
-| Path | Content |
+| Output (`--outdir`) | Content |
 |---|---|
 | `trimmed_reads/` | trimmed FASTQ + cutadapt log |
-| `bams/` | sorted + indexed BAM, marked BAM, dup metrics |
+| `bams/` | sorted, indexed BAM |
 | `qc/picard/`, `qc/fastqc/` | Picard PCR/alignment/insert metrics, FastQC |
-| `variants/germline` or `somatic/` | GVCF / Mutect2 VCF |
-| `coverage/` | bigWig, `*_coverage_report.html`, `*_uniformity.png`, `*_balancing_feedback.json` |
+| `variants/germline/` | GVCF |
+| `report/` | `*_balancing_feedback.json`, `*_target_summary.tsv`, `*_uniformity.png` |
 | `multiqc/` | aggregated report |
 
 ---
 
-## 5. Module 3 – Feedback loop
+## 4. Feedback loop
 
 ```mermaid
 flowchart LR
-    COV["Per-target mean coverage"] --> REL["R = target / panel mean"]
-    REL --> ACT{"Action"}
-    ACT -- "R = 0" --> RD["REDESIGN<br/>gene ID recovered from amplicon name,<br/>re-run design with --rescue"]
-    ACT -- "R below 0.5" --> UP["INCREASE ×1/R (max 10)"]
-    ACT -- "0.5 to 2" --> KEEP["Maintain"]
-    ACT -- "R above 2" --> DOWN["DECREASE ×1/R (min 0.1)"]
-    UP & DOWN & KEEP --> REC["rebalancing_recipe.csv<br/>10 µL × factor"]
+    COV["per-target coverage"] --> REL["R = target mean / panel mean"]
+    REL --> ACT{"R"}
+    ACT -- "0" --> RD["FLAG FOR REDESIGN<br/>gene recovered from amplicon name,<br/>redesigned with --rescue"]
+    ACT -- "< 0.5" --> UP["INCREASE ×1/R (max 10)"]
+    ACT -- "0.5 to 2" --> KEEP["maintain"]
+    ACT -- "> 2" --> DOWN["DECREASE ×1/R (min 0.1)"]
+    UP & DOWN & KEEP --> REC["*_rebalancing_recipe.csv<br/>10 µL × factor per target"]
 ```
 
 ---
 
-## 6. Simulator (`analysis/generate_simulated_fastq.py`)
+## 5. Ordering and running the primers
 
-Deterministic for a given `--seed`; streams to gzip. Options: `--coverage`, `--non-uniform` (10–200 % per amplicon), `--thermal-bias` (coverage falls 20 %/°C from a per-target optimum near 62 °C, stable via CRC32), `--mutation-rate` (default 1 %), `--error-rate` (0.1 %). Writes `<sample>.truth.tsv` listing every injected SNV.
-
----
-
-## 7. What changed (this revision)
-
-```mermaid
-flowchart TD
-    subgraph BROKEN["Found broken"]
-        B1["design.py never imported primer3 / csv;<br/>adapter + hairpin constants undefined"]
-        B2["Bare excepts hid errors as 'no dimer'"]
-        B3["Relative paths as Nextflow path inputs:<br/>CI stub run failed"]
-        B4["GATK ran on duplicate-marked amplicon BAM"]
-        B5["Picard '?' metric crashed the report"]
-        B6["Salt calibration documented but never applied"]
-    end
-    subgraph FIXED["Fixed"]
-        F1["Imports + constants restored, pyflakes in CI"]
-        F2["Specific exceptions, invalid seqs rejected, BLAST fails closed"]
-        F3["Reference inputs via Channel.fromPath"]
-        F4["Variant calling on sorted BAM"]
-        F5["to_float() helper"]
-        F6["KAPA conditions passed to primer3"]
-    end
-    B1 --> F1
-    B2 --> F2
-    B3 --> F3
-    B4 --> F4
-    B5 --> F5
-    B6 --> F6
-```
-
-**Also improved:** BLAST batched (1 call per batch instead of 2 per pair); numeric candidate ranking (was a string sort); Picard-safe BED names; thresholds propagated to worker processes; `--seed`; single-pool no longer drops targets silently; `bwa | samtools sort` with `task.cpus`; correct R1/R2 primer trimming; no `errorStrategy 'ignore'`; seeded simulator with truth file; numpy k-mer script (verified against brute force; 4.6 Mbp, k=12–16 in ~7 s); HTML-escaped reports; `.gitignore` no longer contradicts tracked files (example panels in `design/examples/`).
+* Order `<prefix>_order.csv` oligos as standard primers (desalted is fine for PCR; plate format is convenient). Pool by the `pool` column.
+* One pool = one PCR tube. Overlapping amplicons are already in different pools.
+* If dimers or imbalance persist in the lab: lower per-primer concentration, use a hot-start polymerase, lengthen the annealing/extension step, then run the rebalancing loop above.
 
 ---
 
-## 8. Verified results
+## 6. Verified results
 
-Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml`.
+Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml` (simulated reads, 300×).
 
 | Test | Result |
 |---|---|
-| 21-gene panel | designed in ~7 s → **1 pool**; all 42 primers have exactly 1 perfect genomic hit |
-| 100-gene stress list | 92 designed in **3 pools (62 / 27 / 3)**; 8 failed (e.g. `thrL`, `sokC` are shorter than the minimum amplicon) |
-| Primer trimming | 6,289 / 6,300 pairs retained (99.8 %) |
-| Pipeline | all 12 processes succeed on panel reads and on the CI fixture |
-| Panel coverage | mean 390×, fold-80 1.32, 100 % of targets above 0.2× |
-| Variant calling (42 injected SNVs) | 32 called, 0 false positives (27 with GATK defaults); 10 misses under primers |
-| Unit tests | 27 passing |
+| 21-gene panel | 1 pool, every primer has exactly 1 perfect genomic hit |
+| Pipeline | 10 processes succeed in ~1.5 min; 6,299 / 6,300 pairs retained after trimming |
+| Panel coverage | mean 397×, fold-80 1.33, 100 % of targets above 0.2× |
+| Variants (47 injected SNVs) | 40 called, 0 false positives; all 7 misses lie under primers (trimmed by design), 0 in amplicon interiors |
+| Unit tests | 25 passing; CI runs unit tests plus a real pipeline run on a small fixture |
 
 ```mermaid
 pie showData
-    title "42 injected SNVs: outcome with tuned GATK"
-    "Called by GATK" : 32
-    "Missed: under a primer (trimmed by design)" : 10
+    title "Injected SNVs: outcome"
+    "Called" : 40
+    "Missed, under a primer (not callable)" : 7
 ```
 
----
-
-## 9. Known limitations / open items
-
-* **Variant calling is validated only on simulated reads** (identical per-amplicon reads, 0.1 % error). The GATK tuning above should be re-checked on real data; SNVs under primer sequences are invisible by design.
-* **Short genes** (below ~100 bp) cannot fit an amplicon; designing on gene ± flank would fix this.
-* **Specificity** counts only exact full-length matches; 3′-mismatch near-hits are not scored.
-* **Packing** is randomised first-fit; graph colouring or ILP might beat 3 pools on the 100-gene list.
-* **Assumption:** reads begin at the primer (adapter tail not sequenced). Revisit `--min_primer_overlap` if your library prep differs.
+**Limitations.** Variant calling is validated only on simulated reads (identical copies per amplicon, 0.1 % error). Genes shorter than the minimum amplicon cannot be designed. BLAST screening counts exact full-length hits only (3′-mismatch near-hits are not scored). Packing is randomised first-fit, not optimal. Primers are not checked for cross-products between non-overlapping amplicons in the same pool.
 
 ---
 
-## 10. Repository layout and CI
+## 7. Repository
 
 ```mermaid
 flowchart TD
-    ROOT["repo"] --> DP["design.py"]
-    ROOT --> CORE["core/<br/>biophysics · adapters · io_utils"]
-    ROOT --> AN["analysis/<br/>main.nf · nextflow.config · plot_*.py · generate_simulated_fastq.py · analysis_utils.py"]
-    ROOT --> SC["scripts/<br/>curate_sparse_targets · measure_kmer_uniqueness · make_test_fixture"]
-    ROOT --> DS["design/<br/>targets/ · examples/ · output/ (ignored)"]
-    ROOT --> CR["common_refs/<br/>E. coli genome + GFF"]
-    ROOT --> TS["test_design.py"]
-    ROOT --> CI[".github/workflows/test-pipeline.yml"]
+    R["repo"] --> D["design.py"]
+    R --> C["core/biophysics.py"]
+    R --> A["analysis/<br/>main.nf, nextflow.config, balance.py, plot_uniformity.py,<br/>analysis_utils.py, generate_simulated_fastq.py"]
+    R --> S["scripts/make_test_fixture.py"]
+    R --> X["design/targets/, common_refs/ (E. coli K-12 genome + GFF)"]
+    R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
 ```
 
-```mermaid
-flowchart LR
-    P["push / PR to main"] --> J1["Job 1: pyflakes + pytest"]
-    J1 --> J2["Job 2: micromamba env"]
-    J2 --> FX["make_test_fixture.py<br/>8 kb genome slice, 3 amplicons, simulated reads"]
-    FX --> ST["Nextflow stub run"]
-    ST --> RL["Real run: BWA / Picard / GATK"]
-    RL --> CK["Assert 6 key outputs exist"]
-```
-
----
-
-## 11. FAQ
-
-**Why several pool files?** Overlapping amplicons or mutually dimerising primers can't share a tube; the packer splits them (`_pool_1`, `_pool_2`, …).
-**Fold-80 penalty?** Extra sequencing needed to bring 80 % of targets to the mean; lower is more uniform.
-**Single-end data?** Detected automatically; Cutadapt/BWA adapt, insert-size metrics are skipped gracefully.
-**`--rescue`?** Shifts the extraction window (±25 bp, ±45 bp) when no pair passes at the default position.
+**Removed in this pruning** (all recoverable from git history): adapter tails and the tail-only mode, Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
