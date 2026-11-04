@@ -35,6 +35,14 @@ def parse_per_target_coverage(coverage_file):
         logging.warning(f"Could not parse per-target coverage {coverage_file}: {e}")
     return targets
 
+def to_float(value, default=0.0):
+    """Convert a Picard metric to float; Picard writes '?' (or blank) when undefined."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def calculate_relative_coverage(targets, global_mean):
     """Normalizes target coverage against the panel mean."""
     for t in targets:

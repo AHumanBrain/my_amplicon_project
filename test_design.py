@@ -325,3 +325,20 @@ class TestSimulatorAndFixture:
         for f in ("genome.fna", "targets.bed", "primers_trimming.fasta",
                   "FixtureSample_R1.fastq.gz", "FixtureSample_R2.fastq.gz"):
             assert os.path.exists(os.path.join(out, f))
+
+
+class TestAnalysisUtils:
+    def test_to_float_handles_picard_placeholders(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(design.__file__)), "analysis"))
+        from analysis_utils import to_float
+        assert to_float("?") == 0.0 and to_float("") == 0.0 and to_float(None) == 0.0
+        assert to_float("1.5") == 1.5
+
+    def test_report_survives_undefined_metrics(self, tmp_path):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(design.__file__)), "analysis"))
+        import plot_coverage
+        stats = [{'name': 'a', 'chrom': 'c', 'start': 1, 'end': 9, 'mean_coverage': 10.0}]
+        plot_coverage.generate_html_report(
+            {'MEAN_TARGET_COVERAGE': '10', 'PCT_AMPLIFIED_BASES': '1', 'FOLD_80_BASE_PENALTY': '?'},
+            stats, str(tmp_path / "r.html"), str(tmp_path / "f.json"))
+        assert (tmp_path / "f.json").exists()

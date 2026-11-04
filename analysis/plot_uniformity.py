@@ -6,7 +6,7 @@ import argparse
 import logging
 
 # --- Modular Imports ---
-from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
+from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage, to_float
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -16,7 +16,7 @@ def plot_uniformity(pcr_metrics_path, target_cov_path, output_path, sample_name)
     
     # Use modular utilities
     metrics_dict = parse_picard_pcr_metrics(pcr_metrics_path)
-    global_mean = float(metrics_dict.get('MEAN_TARGET_COVERAGE', 0))
+    global_mean = to_float(metrics_dict.get('MEAN_TARGET_COVERAGE'))
     targets_list = parse_per_target_coverage(target_cov_path)
     
     if not targets_list or global_mean == 0:

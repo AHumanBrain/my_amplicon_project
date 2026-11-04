@@ -4,7 +4,7 @@ import argparse
 import html as htmllib
 
 # --- Modular Imports ---
-from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage
+from analysis_utils import parse_picard_pcr_metrics, parse_per_target_coverage, calculate_relative_coverage, to_float
 
 # --- Logging Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -14,9 +14,9 @@ def generate_html_report(picard_metrics, per_target_stats, output_file, feedback
     """Generate an enhanced HTML report with balancing recommendations."""
     
     total_amplicons = len(per_target_stats)
-    mean_overall = float(picard_metrics.get('MEAN_TARGET_COVERAGE', 0))
-    on_target_pct = float(picard_metrics.get('PCT_AMPLIFIED_BASES', 0)) * 100
-    fold_80 = float(picard_metrics.get('FOLD_80_BASE_PENALTY', 0))
+    mean_overall = to_float(picard_metrics.get('MEAN_TARGET_COVERAGE'))
+    on_target_pct = to_float(picard_metrics.get('PCT_AMPLIFIED_BASES')) * 100
+    fold_80 = to_float(picard_metrics.get('FOLD_80_BASE_PENALTY'))
     
     # Calculate Uniformity (% > 0.2x mean)
     threshold_20 = 0.2 * mean_overall
