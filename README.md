@@ -1,496 +1,323 @@
-# 🧬 Multiplex PCR Ecosystem: Professional User Manual 
+# 🧬 Multiplex Amplicon Toolkit
 
-Welcome to the **Integrated Multiplex PCR Ecosystem**. This codebase provides a complete, production-grade, software-defined bioinformatics toolkit for designing targeted sequencing primer panels, simulating PCR performances, executing Next-Generation Sequencing (NGS) data analysis, and closing the wet-dry loop with automated physical primer pool re-balancing.
+Design multiplex PCR primer panels, simulate reads, analyse sequencing data with Nextflow, and feed coverage back into pool rebalancing.
 
----
-
-## 🔄 Pipeline Flow & System Architecture
-
-The following diagram illustrates how the system's design and analysis stages integrate. The workflow initiates with target genomic files, executes biophysical screening, runs wet-lab sequencing or in-silico simulation, feeds data into an automated Nextflow alignment pipeline, and calculates volume adjustments to optimize subsequent PCR runs.
-
-```mermaid
-flowchart TD
-    subgraph entry["🎯 Pipeline Entry Points"]
-        GENOME["🧬 Genome FASTA<br/><code>--genome</code>"]
-        GFF["📋 Annotation GFF<br/><code>--gff</code>"]
-        TARGETS["📝 Target Genes<br/><code>--target-file</code>"]
-        FEEDBACK["🔄 Feedback JSON<br/><code>--feedback</code>"]
-    end
-
-    subgraph s1["Stage 1: Biophysical Design & Packing"]
-        direction TB
-        P3["primer3-py<br/><small>Tm, GC, and dimer thresholds</small>"]
-        BLAST["NCBI BLAST+<br/><small>Specificity screening</small>"]
-        MCMC["Monte Carlo Packing<br/><small>First-fit pool compression</small>"]
-        P3 --> BLAST --> MCMC
-    end
-
-    subgraph s2["Stage 2: Design Outputs"]
-        CSV["📊 Order Sheet<br/><code>*.csv</code>"]
-        BED["🗺️ Target BED<br/><code>*.bed</code>"]
-        FASTAC["✂️ Trimming FASTA<br/><code>*_trimming.fasta</code>"]
-    end
-
-    subgraph s3["Stage 3: NGS Data Source"]
-        WET["🧪 Wet-Lab NGS<br/><small>Illumina sequencing</small>"]
-        SIM["💻 Sim Script<br/><small>generate_simulated_fastq.py</small>"]
-        FQ["📄 FASTQ Reads<br/><code>raw_data/*.fastq.gz</code>"]
-        SIM --> FQ
-        WET --> FQ
-    end
-
-    subgraph s4["Stage 4: Bioinformatics Pipeline"]
-        direction TB
-        FQC["FastQC<br/><small>Read quality checks</small>"]
-        TRIM["Cutadapt<br/><small>Primer trimming</small>"]
-        ALIGN["BWA MEM<br/><small>Genome alignment</small>"]
-        DUP["Picard MarkDuplicates<br/><small>PCR duplicate profiling</small>"]
-        FQC --> TRIM --> ALIGN --> DUP
-    end
-
-    subgraph s5["Stage 5: Integrated Quantitation"]
-        direction TB
-        PIC["Picard metrics<br/><small>TargetedPcrMetrics</small>"]
-        GATK["GATK variant calls<br/><small>HaplotypeCaller/Mutect2</small>"]
-        DEEP["deepTools coverage<br/><small>BigWig tracks</small>"]
-    end
-
-    subgraph s6["Stage 6: Reporting & Optimization Loop"]
-        REP["📊 plot_coverage.py<br/><small>HTML Report & Feedback JSON</small>"]
-        PLOT["📈 plot_uniformity.py<br/><small>Lorenz uniformity plot (PNG)</small>"]
-        MQC["🌐 MultiQC<br/><small>Aggregate reports</small>"]
-        RECIPE["🔄 balancing_recipe.csv<br/><small>Lab adjustment volumes</small>"]
-    end
-
-    GENOME & GFF & TARGETS --> P3
-    FEEDBACK -- "Mode 3" --> P3
-    MCMC --> CSV & BED & FASTAC
-    FASTAC --> TRIM
-    BED --> PIC
-    FQ --> FQC
-    DUP --> PIC & GATK & DEEP
-    PIC --> REP & PLOT
-    REP --> RECIPE
-    RECIPE --> FEEDBACK
-    REP -- "Flagged Redesign" --> FEEDBACK
-
-    style entry fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style s1 fill:#0f3460,stroke:#16213e,color:#e0e0e0
-    style s4 fill:#1f4068,stroke:#16213e,color:#e0e0e0
-    style s6 fill:#162447,stroke:#1e3d59,color:#e0e0e0
-```
+| | |
+|---|---|
+| **Design** | `design.py` → primer3 + BLAST+ + dimer screening + pool packing |
+| **Analyse** | `analysis/main.nf` → Cutadapt, BWA, Picard, GATK, deepTools, MultiQC |
+| **Close the loop** | coverage JSON → pipetting recipe + redesign of failed targets |
+| **Stack** | conda env (`environment.yml`) or Docker (`Dockerfile`); Python 3.11, Nextflow ≥ 25.04 |
 
 ---
 
-## 📂 Repository Layout
-
-This project isolates biophysical design, NGS analysis, simulation, and curation scripts to maintain a modular architecture.
-
-| Path | Type | Purpose / Description |
-| :--- | :--- | :--- |
-| [`design.py`](design.py) | Python Script | Primers panel generator, adapter tailing tool, and feedback loop processor. |
-| [`core/`](core) | Directory | Biophysical calculations and I/O utility scripts. |
-| ├─ [`core/biophysics.py`](core/biophysics.py) | Python Script | Tm formulas, primer3-py wrappers, dimer thresholds, and 5' hairpin clamping. |
-| ├─ [`core/adapters.py`](core/adapters.py) | Python Script | Standardized NGS adapters (P5/P7) and tailed-oligo formatting logic. |
-| └─ [`core/io_utils.py`](core/io_utils.py) | Python Script | Parsers for BED targets, lists, and synthesis recipe exports. |
-| [`analysis/`](analysis) | Directory | Nextflow pipeline, plotting utilities, and simulator. |
-| ├─ [`analysis/main.nf`](analysis/main.nf) | Nextflow Script | DSL2 pipeline orchestrating QC, alignment, duplicate tagging, metrics, and variant calling. |
-| ├─ [`analysis/nextflow.config`](analysis/nextflow.config) | Nextflow Config | Resource bounds and profile definitions. |
-| ├─ [`analysis/generate_simulated_fastq.py`](analysis/generate_simulated_fastq.py) | Python Script | Generates synthetic read pairs with mutations, non-uniformity, and thermal gradients. |
-| ├─ [`analysis/plot_coverage.py`](analysis/plot_coverage.py) | Python Script | Parses Picard metrics to output coverage dashboards and balancing recommendations. |
-| ├─ [`analysis/plot_uniformity.py`](analysis/plot_uniformity.py) | Python Script | Generates Paragon-style log-scale scatter plots showing panel uniformity. |
-| └─ [`analysis/analysis_utils.py`](analysis/analysis_utils.py) | Python Script | Shared parser library for Picard PCR metrics files. |
-| [`scripts/`](scripts) | Directory | Helper utilities for design input preparation and diagnostic analysis. |
-| ├─ [`scripts/curate_sparse_targets.py`](scripts/curate_sparse_targets.py) | Python Script | Identifies physically separated, non-overlapping target genes from a GFF model. |
-| └─ [`scripts/measure_kmer_uniqueness.py`](scripts/measure_kmer_uniqueness.py) | Python Script | Measures genome-wide k-mer frequencies to assess off-target cross-priming risks. |
-| [`common_refs/`](common_refs) | Directory | Genomes (FASTA format) and annotation models (GFF format). |
-| [`design/`](design) | Directory | Input target lists (`targets/`), generated outputs (`output/`, git-ignored) and reference example panels (`examples/`). |
-| [`ncbi_data/`](ncbi_data) | Directory | Working directory for local genome BLAST databases. |
-| [`raw_data/`](raw_data) | Directory | Destination folder for raw FASTQ inputs. |
-| [`results/`](results) | Directory | Structured outputs of Nextflow pipeline runs (BAMs, VCFs, HTML reports). |
-| [`test_design.py`](test_design.py) | Python Test Suite | Pytest suite: parsers, BLAST batching, design/packing, biophysics, feedback loop. |
-| [`scripts/make_test_fixture.py`](scripts/make_test_fixture.py) | Python Script | Builds a tiny genome slice + BED + primers + simulated reads for CI/smoke tests. |
-| [`Dockerfile`](Dockerfile) | Docker Configuration | Multi-stage container recipe building the conda environment and pipeline tools. |
-| [`environment.yml`](environment.yml) | Conda Environment | Declared bioconda, conda-forge packages, and Python packages. |
-
----
-
-## 🛠️ Installation & Environment Setup
-
-This project is built container-first to isolate the complex bioinformatics stack (BWA, GATK4, Picard, Nextflow, Primer3, BLAST+, Cutadapt, deeptools) from host systems, ensuring reproducibility.
-
-### 🐳 Method A: Docker-First Containerization (Recommended)
-
-1. **Build the Container**:
-   ```bash
-   docker build -t amplicon-project .
-   ```
-2. **Execute Commands via Docker**:
-   * **Design**: 
-     ```bash
-     docker run -v $(pwd):/app amplicon-project python design.py [args]
-     ```
-   * **Analyze**: 
-     ```bash
-     docker run -v $(pwd):/app amplicon-project nextflow run analysis/main.nf [args]
-     ```
-
-### 🐍 Method B: Native Conda Environment (Linux/WSL)
-
-For local development or when running outside Docker, build the environment using micromamba or conda:
-
-1. **Create the environment**:
-   ```bash
-   conda env create -f environment.yml
-   ```
-   *Or using micromamba (much faster):*
-   ```bash
-   micromamba create -y -n amplicon_pipeline -f environment.yml
-   ```
-2. **Activate the environment**:
-   ```bash
-   conda activate amplicon_pipeline
-   ```
-3. **Verify the environment**:
-   Verify that all CLI utilities are exposed in your path:
-   ```bash
-   nextflow -version
-   bwa
-   samtools --version
-   gatk --version
-   pytest test_design.py -v
-   ```
-
----
-
-## 🎯 Module 1: Primer Design (`design.py`)
-
-The unified design tool is powered by the [`core/biophysics.py`](core/biophysics.py) library. It parses coordinates, runs BLAST checks to prevent off-target sequencing, applies thermodynamic filters to avoid primer dimerization, and optimizes multiplexing configurations.
-
-### 🧪 Biophysical Calibration & Rules
-The panel design engine implements thermodynamic constraints, calibrated for high-performance DNA polymerases like **Roche KAPA HiFi HotStart ReadyMix**.
-
-* **Strict Salt Calibration**: Buffers are modeled at $2.5\,\text{mM}\ \text{Mg}^{++}$ and $1.2\,\text{mM}$ total dNTPs ($0.3\,\text{mM}$ each). Calculations use the SantaLucia 1998 salt correction formula.
-* **Ideal Primer Properties**:
-  * **Melting Temp ($T_m$)**: $59.0^\circ\text{C}$ to $61.0^\circ\text{C}$ (Optimum: $60.0^\circ\text{C}$).
-  * **GC Content**: $40\%$ to $60\%$.
-  * **Primer Size**: $19$ to $21$ base pairs.
-  * **Product Amplicon Size**: $150$ to $250$ base pairs (with automatic fallback strategies spanning $100$ to $350$ base pairs).
-* **Dimerization Constraints**:
-  * **Self-Dimerization**: Max allowed $\Delta G = -9.0\,\text{kcal/mol}$.
-  * **Cross-Heterodimerization**: Max allowed $\Delta G = -8.0\,\text{kcal/mol}$ across all primers in the pool.
-  * **3' End Stability (Extender Dimer Check)**: Strict safety floor of $-6.0\,\text{kcal/mol}$ to prevent primer extension from forming primer dimers.
-* **Oligo Modification (Hairpin Clamps)**:
-  * By default, primers use the `rc_tailed` format (reverse-complement sequence plus full adapter tail).
-  * In `fwd_tailed` mode, they are generated as forward-sequence plus a truncated tail. You can add a 5' hairpin clamp (`--add-hairpin-clamp`) that folds back at high temperatures ($\Delta G \approx -11.9\,\text{kcal/mol}$ stem stability) to suppress dimer formation.
-
----
-
-### 🗺️ Operational Modes
-
-The `design.py` script routes execution dynamically based on the arguments supplied.
-
-```mermaid
-flowchart TD
-    ARG{"🔍 Detect CLI Mode"}
-    ARG -- "--genome & --gff & --target-file" --> M1["Mode 1: Full Design Pipeline"]
-    ARG -- "--tail-fwd-file & --tail-rev-file" --> M2["Mode 2: Tail-Only Utility"]
-    ARG -- "--feedback" --> M3["Mode 3: Feedback Optimization"]
-```
-
-#### Mode 1: Full Design Pipeline
-Generates multiplex panels from scratch using a GFF model, genomic FASTA file, and target gene list:
-```bash
-python design.py \
-    --genome common_refs/ecoli_genome.cleaned.fna \
-    --gff common_refs/genomic.gff \
-    --target-file design/targets/housekeeping_genes.txt \
-    --blast-db ncbi_data/ecoli_db \
-    --num-candidates 50 \
-    --monte-carlo-iters 200 \
-    --output-prefix design/output/housekeeping_panel
-```
-
-* **Genomic Overlap / Interleaved Pools**: If targets overlap, the script automatically partitions them into separate, non-overlapping primer pools (e.g., Pool 1 & Pool 2) to prevent on-target cross-priming.
-* **Monte Carlo Packing**: Randomizes target ordering and applies a First-Fit packing engine (`--monte-carlo-iters`) to find the global minimum number of pools.
-
-#### Mode 2: Tail-Only Utility
-Appends standardized P5/P7 adapter sequences to pre-existing forward and reverse primer files:
-```bash
-python design.py \
-    --tail-fwd-file design/targets/fwd_primers.txt \
-    --tail-rev-file design/targets/rev_primers.txt \
-    --oligo-format fwd_tailed \
-    --output-prefix design/output/tailed_oligos
-```
-
-#### Mode 3: Feedback Optimization
-Adjusts pools dynamically using quality control stats and redesigns failed primers:
-```bash
-python design.py \
-    --genome common_refs/ecoli_genome.cleaned.fna \
-    --gff common_refs/genomic.gff \
-    --feedback results/coverage/Anneal_63C_balancing_feedback.json \
-    --rescue \
-    --output-prefix design/output/rebalanced_panel
-```
-
----
-
-### ⚙️ Command-Line Arguments: `design.py`
-
-| Parameter | Mode | Type | Default Value | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `--genome` | Design / Feedback | Path | `common_refs/ecoli_genome.fna` | Reference genome FASTA. Cleans headers automatically. |
-| `--gff` | Design / Feedback | Path | `common_refs/genomic.gff` | Genome annotation model for coordinate mapping. |
-| `--target-file` | Design | Path | *None* | Plain-text file list of target gene IDs (one per line). |
-| `--blast-db` | Design | String | `ncbi_data/ecoli_db` | Output prefix for the generated local BLAST database. |
-| `--force-single-pool` | Design | Flag | `False` | Packs one tube (largest compatible set). Targets that cannot share it are listed in the log rather than silently dropped. |
-| `--force-sparse` | Design | Flag | `False` | Enforces zero overlaps between amplicons in a single pool. |
-| `--monte-carlo-iters`| Design | Integer| `20` | Shuffles target orders to compress panel pools. |
-| `--force-multiprime` | Design | Flag | `False` | Allows multi-locus primer hits (e.g., 16S rRNA genes). |
-| `--num-candidates` | Design | Integer| `25` | Number of candidate pairs designed per target before packing. |
-| `--max-heterodimer-dg`| Design | Float | `-8.0` | Threshold $\Delta G$ (kcal/mol) for pool-wide heterodimers. |
-| `--max-self-dimer-dg` | Design | Float | `-9.0` | Threshold $\Delta G$ (kcal/mol) for self-binding dimers. |
-| `--max-end-stability-dg`| Design | Float | `-6.0` | Maximum 3' end stability $\Delta G$ to prevent extensions. |
-| `--oligo-format` | All | Enum | `rc_tailed` | Format of tails: `rc_tailed` or `fwd_tailed`. |
-| `--add-hairpin-clamp`| Design | Flag | `False` | Appends a 5' hairpin stem clamp (requires `fwd_tailed`). |
-| `--feedback` | Feedback | Path | *None* | Balancing feedback JSON from the analysis run. Takes priority over the other modes; also needs `--genome`/`--gff` (defaults apply) to redesign flagged targets. |
-| `--rescue` | Feedback | Flag | `False` | Shifts target windows if design fails or has no coverage. |
-| `--tail-fwd-file` | Tail-Only | Path | *None* | List of forward primer sequences to append tails to. |
-| `--tail-rev-file` | Tail-Only | Path | *None* | List of reverse primer sequences to append tails to. |
-| `--output-prefix` | All | Path | `design/output/final_primers` | Output prefix for CSV, BED, FASTA, and DIMERS files. |
-| `--seed` | Design | Integer | `0` | Random seed for Monte Carlo packing (runs are reproducible). |
-| `--log-file` | All | Path | *None* | Optional file to also write logs to. |
-
----
-
-## 💻 Module 2: Sequencing Simulation (`generate_simulated_fastq.py`)
-
-To validate panels in silico, the ecosystem includes a sequencing simulator that models read outputs, target mutations, and thermal gradient behaviors.
-
-```bash
-python analysis/generate_simulated_fastq.py \
-    --genome common_refs/ecoli_genome.cleaned.fna \
-    --bed design/output/final_primers_pool_1.bed \
-    --output-dir raw_data \
-    --sample-name Anneal_63C \
-    --coverage 500 \
-    --thermal-bias 63.0 \
-    --non-uniform
-```
-
-### 📈 Simulation Features
-* **Mutation Injection**: Automatically introduces random Single Nucleotide Variants (SNVs) at a rate of $1\%$ to simulate genetic diversity.
-* **Thermal Annealing Modeling**: Simulates coverage drop-offs based on temperature differences between the simulated run temperature (`--thermal-bias`) and the optimal primer melting temperature (centered near $62^\circ\text{C}$):
-  $$\text{Coverage Scaling} = \max\left(0.05, 1.0 - 0.2 \times |T_{\text{anneal}} - T_{\text{opt}}|\right)$$
-* **Non-Uniformity**: Randomly scales target coverages between $10\%$ and $200\%$ of target coverage when `--non-uniform` is supplied.
-
----
-
-## ⚙️ Module 3: Nextflow Analysis Pipeline (`main.nf`)
-
-The bioinformatics pipeline processes raw sequences to generate alignments, deduplicate reads, calculate coverage, call variants, and output reports.
-
-```bash
-# Run analysis using WSL/Linux
-nextflow run analysis/main.nf \
-    --reads "raw_data/Anneal_63C_R{1,2}.fastq.gz" \
-    --genome "common_refs/ecoli_genome.cleaned.fna" \
-    --bed "design/output/final_primers_pool_1.bed" \
-    --primers "design/output/final_primers_pool_1_trimming.fasta" \
-    --mode germline \
-    --outdir results
-```
-
-### 🔄 Pipeline Execution Steps
+## 1. Big picture
 
 ```mermaid
 flowchart LR
-    FQC["1. Quality Control<br/>(FastQC)"]
-    CUT["2. Adapter Trimming<br/>(Cutadapt)"]
-    BWA["3. Alignment<br/>(BWA MEM)"]
-    SRT["4. Sort & Index<br/>(Samtools)"]
-    DUP["5. Duplicate Tagging<br/>(MarkDuplicates)"]
-    PIC["6. Target Metrics<br/>(TargetedPcrMetrics)"]
-    VAR["7. Variant Calling<br/>(GATK Haplotype/Mutect2)"]
-    REP["8. Visualization<br/>(plot_coverage & MultiQC)"]
+    subgraph IN["Inputs"]
+        G["Genome FASTA"]
+        A["GFF annotation"]
+        T["Target gene list"]
+    end
+    subgraph DES["design.py"]
+        D1["primer3 candidates"] --> D2["BLAST specificity"] --> D3["Dimer filters"] --> D4["Pool packing"]
+    end
+    subgraph OUT["Design outputs"]
+        O1["*.csv order sheet"]
+        O2["*.bed amplicons"]
+        O3["*_trimming.fasta"]
+    end
+    subgraph SEQ["Data"]
+        W["Wet-lab FASTQ"]
+        S["Simulated FASTQ<br/>generate_simulated_fastq.py"]
+    end
+    subgraph NF["analysis/main.nf"]
+        N1["Trim → Align → Metrics → Variants"]
+    end
+    subgraph FB["Feedback"]
+        F1["balancing_feedback.json"]
+        F2["rebalancing_recipe.csv"]
+    end
 
-    FQC --> CUT --> BWA --> SRT --> DUP --> PIC --> VAR --> REP
+    G & A & T --> D1
+    D4 --> O1 & O2 & O3
+    O2 --> S
+    S --> N1
+    W --> N1
+    O2 & O3 --> N1
+    N1 --> F1 --> F2
+    F1 -- "REDESIGN flags" --> D1
 ```
 
-1. **FASTQC**: Profiles raw reads to output base quality distributions.
-2. **TRIM_PRIMERS**: Splits the trimming FASTA into forward (`*_F`) and reverse (`*_R`) primers and runs Cutadapt so R1 is only searched for forward primers and R2 for reverse primers (`-O` minimum overlap = `--min_primer_overlap`, default 15). Un-trimmed reads are discarded to ensure specific mapping.
-3. **BUILD_INDICES / ALIGN**: Indexes genomes and aligns reads using BWA MEM.
-4. **ALIGN / SORT_INDEX_BAM**: BWA MEM output is piped straight into `samtools sort` (no unsorted intermediate); the BAM is then indexed.
-5. **MARK_DUPLICATES**: Profiles PCR duplicate rates using Picard.
-6. **PICARD_METRICS**: Runs Picard `CollectTargetedPcrMetrics` to calculate on-target percentages and uniformity metrics.
-7. **VARIANT_CALLING**:
-   * **Germline Mode (Default)**: Uses GATK `HaplotypeCaller` with a conservative PCR indel model to detect mutations.
-   * **Somatic Mode**: Uses GATK `Mutect2` in tumor-only configuration to identify low-frequency mutations.
-8. **COVERAGE_TRACKS**: Generates BigWig browser coverage files using deepTools `bamCoverage`.
-9. **PLOT_COVERAGE & PLOT_UNIFORMITY**: Compiles custom HTML reports and coverage plots.
-10. **MULTIQC**: Aggregates pipeline outputs into a unified web report.
-
 ---
 
-## 🔄 Module 4: Feedback Loop & Pool Re-balancing
+## 2. Quick start
 
-Uniform amplification is critical in multiplex PCR. The feedback loop automatically balances pool chemistry by adjusting volumes based on coverage.
-
-### 📐 Balancing Calculations
-For each target $t$, the script evaluates coverage to calculate adjustment recommendations:
-
-1. **Relative Mean Coverage ($R_t$)**:
-   $$R_t = \frac{C_t}{C_{\text{overall}}}$$
-   Where $C_t$ is target mean coverage, and $C_{\text{overall}}$ is overall mean coverage.
-2. **Adjustment Factor ($A_t$)**:
-   $$A_t = \frac{1}{R_t}$$
-   *Capped in the range: $0.1 \le A_t \le 10.0$*
-3. **Recommended Volume ($V_t$)**:
-   $$V_t = V_{\text{baseline}} \times A_t$$
-   *Where $V_{\text{baseline}} = 10.0\,\mu\text{L}$*
-
-### 🛠️ Lab Action Matrix
-
-| Rel. Mean ($R_t$) | Action | Badge Color | Physical Adjustment |
-| :--- | :--- | :--- | :--- |
-| **$R_t = 0.0$** | `🔥 FLAG FOR REDESIGN` | Magenta | Sequence failed. Shift window or relax thermodynamic bounds. |
-| **$R_t < 0.2$** | `INCREASE concentration` | Red | Low coverage. Increase primer concentration up to 10.0x. |
-| **$0.2 \le R_t < 0.5$** | `INCREASE concentration` | Orange | Mild low-bias. Increase primer concentration. |
-| **$0.5 \le R_t \le 2.0$** | `Maintain current concentration`| Blue | Optimal performance. Keep concentration baseline. |
-| **$R_t > 2.0$** | `DECREASE concentration` | Red/Yellow | Strong amplification bias. Dilute primer concentration down to 0.1x. |
-
-### 🔄 Executing a Feedback Loop
-1. The analysis pipeline outputs a feedback file: `results/coverage/SampleName_balancing_feedback.json`.
-2. Feed this file back into the design script:
-   ```bash
-   python design.py \
-       --genome common_refs/ecoli_genome.cleaned.fna \
-       --gff common_refs/genomic.gff \
-       --feedback results/coverage/Anneal_63C_balancing_feedback.json \
-       --rescue \
-       --output-prefix design/output/rebalanced_panel
-   ```
-3. This creates a pipetting volume table [`design/output/rebalanced_panel_rebalancing_recipe.csv`](design/output/rebalanced_panel_rebalancing_recipe.csv) and automatically triggers window-shifted redesigns for failed targets:
-
-   * **Synthesis Order Recipe Table Structure**:
-     ```csv
-     Target,Current_Rel_Mean,Adjustment_Factor,Action,Recommended_Vol_uL
-     thrA,0.40x,2.50x,INCREASE concentration to 2.5x,25.00
-     thrL,1.20x,0.83x,Maintain current concentration,8.33
-     yqgC,0.00x,10.00x,🔥 FLAG FOR REDESIGN,100.00
-     ```
-
----
-
-## 📈 Quality Control & Visualization Outputs
-
-### 1. The HTML Performance Dashboard
-Saved in `results/coverage/SampleName_coverage_report.html`, this report contains:
-* **Metric Cards**: Total amplicons, Mean Coverage, On-target percentage, Fold-80 Penalty, and Uniformity percentage.
-* **Adjustments Table**: Interactive recommendations sorted by performance.
-* **Interactive Coverage Bars**: Visual comparison of amplicon yields.
-
-### 2. Paragon-Style Uniformity Plot
-Saved in `results/coverage/SampleName_uniformity.png`, this plot visualizes coverage log-scales:
-* **Y-Axis**: Relative Coverage (log-scale).
-* **Reference Lines**: Mean (100% / 1.0x), 500% (5.0x threshold), and 20% (0.2x threshold).
-* **Color Coding**: Blue dots for passing amplicons, and red dots for failing targets.
-
----
-
-## 🚀 End-to-End Walkthrough Tutorial
-
-Here is a step-by-step example workflow targeting 100 housekeeping genes.
-
-### 📋 Step 1: Curate Targets
-Filter the GFF file to identify 100 physically separated gene models (with a minimum distance of $2500\,\text{bp}$):
 ```bash
-python scripts/curate_sparse_targets.py \
-    common_refs/genomic.gff \
-    design/targets/stress_test_100.txt \
-    100 \
-    2500
-```
+# environment (conda/micromamba) – or: docker build -t amplicon-project .
+micromamba create -y -n amplicon_pipeline -f environment.yml
+micromamba activate amplicon_pipeline
 
-### 🎨 Step 2: Run Initial Design
-Design compatible primer pools:
-```bash
-python design.py \
-    --genome common_refs/ecoli_genome.fna \
+# 1. design a panel (21 housekeeping genes ≈ 7 s)
+python design.py --genome common_refs/ecoli_genome.cleaned.fna \
     --gff common_refs/genomic.gff \
-    --target-file design/targets/stress_test_100.txt \
-    --blast-db ncbi_data/ecoli_db \
-    --num-candidates 30 \
-    --monte-carlo-iters 50 \
-    --output-prefix design/output/V10_Ultrapool
-```
+    --target-file design/targets/housekeeping_genes.txt \
+    --blast-db ncbi_data/ecoli_db --output-prefix design/output/hk
 
-### 💻 Step 3: Simulate NGS Reads
-Model a sequencing run featuring non-uniformity and temperature gradients:
-```bash
-python analysis/generate_simulated_fastq.py \
-    --genome common_refs/ecoli_genome.cleaned.fna \
-    --bed design/output/V10_Ultrapool_pool_1.bed \
-    --output-dir raw_data \
-    --sample-name V10_Sample_Run \
-    --coverage 400 \
-    --thermal-bias 61.5 \
-    --non-uniform
-```
+# 2. simulate reads (also writes raw_data/HK.truth.tsv, the injected SNVs)
+python analysis/generate_simulated_fastq.py --genome common_refs/ecoli_genome.cleaned.fna \
+    --bed design/output/hk_pool_1.bed --output-dir raw_data --sample-name HK --coverage 300 --seed 1
 
-### ⚙️ Step 4: Run Alignment & Variant Pipeline
-Process reads using Nextflow:
-```bash
-nextflow run analysis/main.nf \
-    --reads "raw_data/V10_Sample_Run_R{1,2}.fastq.gz" \
-    --genome "common_refs/ecoli_genome.cleaned.fna" \
-    --bed "design/output/V10_Ultrapool_pool_1.bed" \
-    --primers "design/output/V10_Ultrapool_pool_1_trimming.fasta" \
-    --mode germline \
-    --outdir results
-```
+# 3. analyse
+nextflow run analysis/main.nf --genome common_refs/ecoli_genome.cleaned.fna \
+    --reads "raw_data/HK_R{1,2}.fastq.gz" --bed design/output/hk_pool_1.bed \
+    --primers design/output/hk_pool_1_trimming.fasta --outdir results
 
-### 🔄 Step 5: Execute Re-balancing
-Process pipeline feedback to generate optimization recipes:
-```bash
-python design.py \
-    --genome common_refs/ecoli_genome.cleaned.fna \
-    --gff common_refs/genomic.gff \
-    --feedback results/coverage/V10_Sample_Run_balancing_feedback.json \
-    --rescue \
-    --output-prefix design/output/V10_Optimized
+# 4. rebalance / redesign from coverage
+python design.py --feedback results/coverage/HK_balancing_feedback.json --rescue \
+    --output-prefix design/output/hk_v2
 ```
 
 ---
 
-## ✅ Verified Behaviour & Known Limitations
+## 3. Module 1 – Primer design (`design.py`)
 
-Verified end to end with real BLAST+, BWA, Picard, GATK and Cutadapt (conda env from `environment.yml`):
+### 3.1 Per-target logic
 
-* **Design**: the 21-gene housekeeping panel designs in ~7 s and packs into 1 pool; an independent BLAST re-check found every primer has exactly one perfect genomic hit. The 100-gene `stress_test_100.txt` list yields 92 designed targets in 3 pools (62/27/3) with the salt-calibrated dimer model.
-* **Pipeline**: simulated reads from the housekeeping panel trim (99.8 % retained), align, and produce metrics, a coverage report, a uniformity plot, MultiQC and a GVCF.
-* **Variant recall (simulated, 42 injected SNVs)**: 27 called, 0 false positives. 10 of the 15 misses fall *inside primer-binding sites*, which are trimmed by design (primer-derived bases cannot report template variants). The remaining 5 are in the amplicon interior and are not yet explained.
+```mermaid
+flowchart TD
+    S["Extract gene sequence from GFF + FASTA"] --> P["primer3: N candidate pairs<br/>Strategy 0 ideal"]
+    P --> B["ONE blastn call per candidate batch<br/>exact full-length hits only"]
+    B --> C1["BLAST: at most 1 genomic hit<br/>fails closed on BLAST error"]
+    C1 --> C2["Self-dimer ≥ -9.0 kcal/mol"]
+    C2 --> C3["F/R heterodimer ≥ -8.0"]
+    C3 --> C4["3' end stability ≥ -6.0 both directions"]
+    C4 --> OK["Keep pair"]
+    P -. "no valid pair" .-> FB1["Fallback strategies 1 to 3<br/>longer / shorter / relaxed Tm"]
+    FB1 -. "still none" .-> R["--rescue: shift window ±25 bp, ±45 bp"]
+    R -. "still none" .-> X["Target reported as failed"]
+```
 
-Known limitations:
+### 3.2 Packing candidates into pools
 
-* **Short genes**: the amplicon must fit inside the gene (default minimum 100 bp), so genes shorter than that (e.g. `thrL`, `sokC`) fail design. Designing on gene ± flank would fix this.
-* **Duplicates**: amplicon reads share start positions, so >99 % of pairs are flagged as duplicates. Variant calling and coverage therefore use the sorted (not duplicate-marked) BAM; `MARK_DUPLICATES` is informational only.
-* **Specificity**: BLAST screening counts only exact full-length matches; near-matches with 3′ mismatches are not scored.
+```mermaid
+flowchart LR
+    M["Candidates per target<br/>sorted by strategy, then numeric rank"] --> I["Monte Carlo first-fit<br/>iteration 0 = genomic order,<br/>others shuffled with --seed"]
+    I --> Q{"Fits an existing pool?<br/>cross-dimer + overlap checks"}
+    Q -- yes --> A["Add best-ranked compatible candidate"]
+    Q -- no --> N["Open new pool"]
+    A & N --> K["Keep run with fewest pools"]
+    K --> W["Write *_pool_N.csv / .bed / _trimming.fasta / .dimers.txt"]
+```
+
+### 3.3 Thermodynamic model
+
+| Setting | Value | Note |
+|---|---|---|
+| Mg²⁺ / dNTP / Na⁺ / DNA | 2.5 mM / 1.2 mM / 50 mM / 50 nM | KAPA HiFi; **now applied to every primer3 call** |
+| Tm window | 59–61 °C (fallback 55–65) | GC 40–60 %, 19–21 nt |
+| Amplicon | 150–250 bp (fallback 100–350) | must fit inside the gene |
+| Self-dimer / heterodimer / 3′ end | −9.0 / −8.0 / −6.0 kcal/mol | override with `--max-*-dg` |
+
+### 3.4 Modes and key flags
+
+```mermaid
+flowchart TD
+    A{"Arguments"} -- "--feedback" --> M3["Mode 3: rebalance + redesign<br/>(takes priority)"]
+    A -- "--target-file" --> M1["Mode 1: full design"]
+    A -- "--tail-fwd-file + --tail-rev-file" --> M2["Mode 2: add adapter tails only"]
+```
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--num-candidates` | 25 | pairs designed per target |
+| `--monte-carlo-iters` | 20 | packing restarts |
+| `--seed` | 0 | reproducible packing |
+| `--force-single-pool` | off | one tube; targets that don't fit are **listed in the log**, not silently dropped |
+| `--force-sparse` | off | enforce zero amplicon overlap |
+| `--force-multiprime` | off | allow multi-copy loci (e.g. 16S) |
+| `--oligo-format` | `rc_tailed` | or `fwd_tailed` (+ `--add-hairpin-clamp`) |
+| `--output-prefix` | `design/output/final_primers` | |
+| `--log-file` | none | optional log file |
 
 ---
 
-## ❓ Frequently Asked Questions
+## 4. Module 2 – Nextflow pipeline (`analysis/main.nf`)
 
-**Q: Why does the script output multiple primer pool files?**  
-A: Overlapping amplicons in a single pool will cause cross-priming and form primer dimers. The packing algorithm automatically splits overlapping targets into independent pools (e.g., `_pool_1.csv`, `_pool_2.csv`) to maintain assay specificity.
+```mermaid
+flowchart TD
+    R["Reads R1/R2"] --> FQ["FASTQC"]
+    R --> TR["TRIM_PRIMERS<br/>cutadapt: R1 fwd primers, R2 rev primers"]
+    GN["Genome"] --> BI["BUILD_INDICES<br/>bwa, faidx, dict"]
+    BED["Amplicon BED"] --> PI["PREP_INTERVALS"]
+    BI --> PI
+    TR --> AL["ALIGN<br/>bwa mem piped to samtools sort"]
+    BI --> AL
+    AL --> SI["SORT_INDEX_BAM<br/>index only"]
+    SI --> MD["MARK_DUPLICATES<br/>informational"]
+    SI --> PM["PICARD_METRICS"]
+    PI --> PM
+    SI --> VC["GERMLINE_CALLING or MUTECT2<br/>--mode germline / somatic"]
+    SI --> BW["COVERAGE_TRACKS .bw"]
+    PM --> PC["PLOT_COVERAGE<br/>HTML + feedback JSON + uniformity PNG"]
+    FQ & TR & PM & PC & MD --> MQ["MULTIQC"]
+```
 
-**Q: What is the Fold-80 Base Penalty?**  
-A: It measures coverage uniformity. A Fold-80 penalty of 1.5 means you need 1.5 times more sequencing depth to bring 80% of targets up to the mean coverage. Lower values indicate higher panel uniformity.
+### Primer trimming
 
-**Q: How does the primer rescue feature function?**  
-A: When `--rescue` is enabled, if a target gene cannot design compatible primers within its default window, the engine shifts the extraction region upstream or downstream (by 25bp, then 30% window jumps) to bypass complex sequences.
+```mermaid
+flowchart LR
+    PF["*_trimming.fasta<br/>tail+primer, names end _F / _R"] --> SPLIT["awk split"]
+    SPLIT --> FW["fwd_primers.fa"]
+    SPLIT --> RV["rev_primers.fa"]
+    FW -- "-g" --> CA["cutadapt -O 15<br/>--discard-untrimmed"]
+    RV -- "-G" --> CA
+    R1["R1"] --> CA
+    R2["R2"] --> CA
+    CA --> TRIMMED["trimmed pairs"]
+```
 
-**Q: Can I process single-end (SE) FASTQ data?**  
-A: Yes. The Nextflow pipeline automatically detects whether inputs are single-end or paired-end, and configures Cutadapt and BWA MEM parameters accordingly.
+Reads start inside tail+primer, so partial 5′ matches are expected; `--min_primer_overlap` (default 15) prevents spurious short hits.
+
+### Why variants are called on the *non*-duplicate-marked BAM
+
+```mermaid
+flowchart LR
+    A["Amplicon reads share start positions"] --> B["Picard: 99.7 % duplicates"]
+    B --> C{"BAM given to GATK"}
+    C -- "duplicate-marked" --> D["GATK drops dups: mean DP 2,<br/>17 variants (wrong)"]
+    C -- "sorted, unmarked" --> E["mean DP ~83 at calling sites:<br/>27 of 42 SNVs, 0 false positives"]
+```
+
+### Outputs (`--outdir`)
+
+| Path | Content |
+|---|---|
+| `trimmed_reads/` | trimmed FASTQ + cutadapt log |
+| `bams/` | sorted + indexed BAM, marked BAM, dup metrics |
+| `qc/picard/`, `qc/fastqc/` | Picard PCR/alignment/insert metrics, FastQC |
+| `variants/germline` or `somatic/` | GVCF / Mutect2 VCF |
+| `coverage/` | bigWig, `*_coverage_report.html`, `*_uniformity.png`, `*_balancing_feedback.json` |
+| `multiqc/` | aggregated report |
+
+---
+
+## 5. Module 3 – Feedback loop
+
+```mermaid
+flowchart LR
+    COV["Per-target mean coverage"] --> REL["R = target / panel mean"]
+    REL --> ACT{"Action"}
+    ACT -- "R = 0" --> RD["REDESIGN<br/>gene ID recovered from amplicon name,<br/>re-run design with --rescue"]
+    ACT -- "R below 0.5" --> UP["INCREASE ×1/R (max 10)"]
+    ACT -- "0.5 to 2" --> KEEP["Maintain"]
+    ACT -- "R above 2" --> DOWN["DECREASE ×1/R (min 0.1)"]
+    UP & DOWN & KEEP --> REC["rebalancing_recipe.csv<br/>10 µL × factor"]
+```
+
+---
+
+## 6. Simulator (`analysis/generate_simulated_fastq.py`)
+
+Deterministic for a given `--seed`; streams to gzip. Options: `--coverage`, `--non-uniform` (10–200 % per amplicon), `--thermal-bias` (coverage falls 20 %/°C from a per-target optimum near 62 °C, stable via CRC32), `--mutation-rate` (default 1 %), `--error-rate` (0.1 %). Writes `<sample>.truth.tsv` listing every injected SNV.
+
+---
+
+## 7. What changed (this revision)
+
+```mermaid
+flowchart TD
+    subgraph BROKEN["Found broken"]
+        B1["design.py never imported primer3 / csv;<br/>adapter + hairpin constants undefined"]
+        B2["Bare excepts hid errors as 'no dimer'"]
+        B3["Relative paths as Nextflow path inputs:<br/>CI stub run failed"]
+        B4["GATK ran on duplicate-marked amplicon BAM"]
+        B5["Picard '?' metric crashed the report"]
+        B6["Salt calibration documented but never applied"]
+    end
+    subgraph FIXED["Fixed"]
+        F1["Imports + constants restored, pyflakes in CI"]
+        F2["Specific exceptions, invalid seqs rejected, BLAST fails closed"]
+        F3["Reference inputs via Channel.fromPath"]
+        F4["Variant calling on sorted BAM"]
+        F5["to_float() helper"]
+        F6["KAPA conditions passed to primer3"]
+    end
+    B1 --> F1
+    B2 --> F2
+    B3 --> F3
+    B4 --> F4
+    B5 --> F5
+    B6 --> F6
+```
+
+**Also improved:** BLAST batched (1 call per batch instead of 2 per pair); numeric candidate ranking (was a string sort); Picard-safe BED names; thresholds propagated to worker processes; `--seed`; single-pool no longer drops targets silently; `bwa | samtools sort` with `task.cpus`; correct R1/R2 primer trimming; no `errorStrategy 'ignore'`; seeded simulator with truth file; numpy k-mer script (verified against brute force; 4.6 Mbp, k=12–16 in ~7 s); HTML-escaped reports; `.gitignore` no longer contradicts tracked files (example panels in `design/examples/`).
+
+---
+
+## 8. Verified results
+
+Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml`.
+
+| Test | Result |
+|---|---|
+| 21-gene panel | designed in ~7 s → **1 pool**; all 42 primers have exactly 1 perfect genomic hit |
+| 100-gene stress list | 92 designed in **3 pools (62 / 27 / 3)**; 8 failed (e.g. `thrL`, `sokC` are shorter than the minimum amplicon) |
+| Primer trimming | 6,289 / 6,300 pairs retained (99.8 %) |
+| Pipeline | all 12 processes succeed on panel reads and on the CI fixture |
+| Panel coverage | mean 390×, fold-80 1.32, 100 % of targets above 0.2× |
+| Unit tests | 27 passing |
+
+```mermaid
+pie showData
+    title "42 injected SNVs: outcome"
+    "Called by GATK" : 27
+    "Missed: under a primer (trimmed by design)" : 10
+    "Missed: amplicon interior (unexplained)" : 5
+```
+
+---
+
+## 9. Known limitations / open items
+
+* **5 interior SNVs are not called** although the BAM pileup shows them at 100 % allele fraction and 300×; under investigation.
+* **Short genes** (below ~100 bp) cannot fit an amplicon; designing on gene ± flank would fix this.
+* **Specificity** counts only exact full-length matches; 3′-mismatch near-hits are not scored.
+* **Packing** is randomised first-fit; graph colouring or ILP might beat 3 pools on the 100-gene list.
+* **Assumption:** reads begin at the primer (adapter tail not sequenced). Revisit `--min_primer_overlap` if your library prep differs.
+
+---
+
+## 10. Repository layout and CI
+
+```mermaid
+flowchart TD
+    ROOT["repo"] --> DP["design.py"]
+    ROOT --> CORE["core/<br/>biophysics · adapters · io_utils"]
+    ROOT --> AN["analysis/<br/>main.nf · nextflow.config · plot_*.py · generate_simulated_fastq.py · analysis_utils.py"]
+    ROOT --> SC["scripts/<br/>curate_sparse_targets · measure_kmer_uniqueness · make_test_fixture"]
+    ROOT --> DS["design/<br/>targets/ · examples/ · output/ (ignored)"]
+    ROOT --> CR["common_refs/<br/>E. coli genome + GFF"]
+    ROOT --> TS["test_design.py"]
+    ROOT --> CI[".github/workflows/test-pipeline.yml"]
+```
+
+```mermaid
+flowchart LR
+    P["push / PR to main"] --> J1["Job 1: pyflakes + pytest"]
+    J1 --> J2["Job 2: micromamba env"]
+    J2 --> FX["make_test_fixture.py<br/>8 kb genome slice, 3 amplicons, simulated reads"]
+    FX --> ST["Nextflow stub run"]
+    ST --> RL["Real run: BWA / Picard / GATK"]
+    RL --> CK["Assert 6 key outputs exist"]
+```
+
+---
+
+## 11. FAQ
+
+**Why several pool files?** Overlapping amplicons or mutually dimerising primers can't share a tube; the packer splits them (`_pool_1`, `_pool_2`, …).
+**Fold-80 penalty?** Extra sequencing needed to bring 80 % of targets to the mean; lower is more uniform.
+**Single-end data?** Detected automatically; Cutadapt/BWA adapt, insert-size metrics are skipped gracefully.
+**`--rescue`?** Shifts the extraction window (±25 bp, ±45 bp) when no pair passes at the default position.
