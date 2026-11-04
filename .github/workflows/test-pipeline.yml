@@ -56,7 +56,21 @@ jobs:
         shell: micromamba-shell {0}
         run: python scripts/make_test_fixture.py --outdir "$RUNNER_TEMP/fixture"
 
-      - name: Run pipeline (stub)
+      - name: Run pipeline (stub, fast structure check)
+        shell: micromamba-shell {0}
+        run: |
+          FX="$RUNNER_TEMP/fixture"
+          cd analysis
+          nextflow run main.nf \
+            --genome "$FX/genome.fna" \
+            --reads "$FX/FixtureSample_R{1,2}.fastq.gz" \
+            --primers "$FX/primers_trimming.fasta" \
+            --bed "$FX/targets.bed" \
+            --outdir "$RUNNER_TEMP/results_stub" \
+            -stub-run \
+            -work-dir "$RUNNER_TEMP/nf_work_stub"
+
+      - name: Run pipeline (real BWA / Picard / GATK on fixture)
         shell: micromamba-shell {0}
         run: |
           FX="$RUNNER_TEMP/fixture"
@@ -67,10 +81,17 @@ jobs:
             --primers "$FX/primers_trimming.fasta" \
             --bed "$FX/targets.bed" \
             --outdir "$RUNNER_TEMP/results" \
-            -stub-run \
             -work-dir "$RUNNER_TEMP/nf_work"
 
       - name: Check expected outputs
         run: |
-          test -f "$RUNNER_TEMP/results/multiqc/multiqc_report.html"
-          ls "$RUNNER_TEMP/results"
+          R="$RUNNER_TEMP/results"
+          for f in multiqc/multiqc_report.html \
+                   coverage/FixtureSample_balancing_feedback.json \
+                   coverage/FixtureSample_coverage_report.html \
+                   coverage/FixtureSample_uniformity.png \
+                   variants/germline/FixtureSample.g.vcf.gz \
+                   qc/picard/FixtureSample_pcr_metrics.txt; do
+            test -s "$R/$f" || { echo "missing or empty: $f"; exit 1; }
+          done
+          ls -R "$R" | head -50
