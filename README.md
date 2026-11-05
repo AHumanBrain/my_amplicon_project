@@ -1,5 +1,7 @@
 # 🧬 Multiplex Amplicon Toolkit
 
+A platform for **custom-panel multiplex PCR**. You decide what to target (DNA regions, RNA/cDNA transcripts, anything with a sequence); the tool designs the primers, checks specificity, screens dimers and packs primers into pools. How well a target enriches is a function of how you specify it: for mRNA that means telling the tool where the splice junctions are.
+
 Three things, and only these:
 
 1. **Design** multiplex PCR primer panels (primer3 + BLAST+ + dimer screening)
@@ -10,7 +12,7 @@ Primers are plain oligos: order them from IDT, Twist, GenScript or anyone else. 
 
 ```mermaid
 flowchart LR
-    G["Genome FASTA + GFF"] & T["Target genes"] --> D["design.py"]
+    G["Reference FASTA(s)<br/>genome and/or transcriptome"] & T["Targets TSV<br/>regions + constraints"] --> D["design.py"]
     D --> O["panel_order.csv<br/>pool, name, sequence"]
     D --> B["panel_pool_N.bed / .csv<br/>panel_pool_N_trimming.fasta"]
     O -. "order oligos, run PCR + sequence" .-> R["FASTQ reads"]
@@ -26,40 +28,84 @@ flowchart LR
 ```bash
 micromamba create -y -n amplicon_pipeline -f environment.yml && micromamba activate amplicon_pipeline
 
-# design (21 housekeeping genes: ~40 s incl. building the BLAST db, 1 pool)
-python design.py --target-file design/targets/housekeeping_genes.txt --output-prefix design/output/hk
+# design: 21 E. coli housekeeping genes (whole-gene regions), 1 pool, ~10 s
+python design.py --targets design/targets/housekeeping.tsv --output-prefix design/output/hk
 
-# optional: simulate reads (also writes raw_data/HK.truth.tsv listing injected SNVs)
-python analysis/generate_simulated_fastq.py --genome common_refs/ecoli_genome.fna \
-    --bed design/output/hk_pool_1.bed --output-dir raw_data --sample-name HK --coverage 300 --seed 1
-
-# analyse one pool
-nextflow run analysis/main.nf --reads "raw_data/HK_R{1,2}.fastq.gz" \
+# analyse sequencing of one pool
+nextflow run analysis/main.nf --reads "raw_data/HK_R{1,2}.fastq.gz" --genome common_refs/ecoli_genome.fna \
     --bed design/output/hk_pool_1.bed --primers design/output/hk_pool_1_trimming.fasta --outdir results
 
-# rebalance + redesign from coverage
-python design.py --feedback results/report/HK_balancing_feedback.json --output-prefix design/output/hk_v2
+# rebalance + redesign flagged targets (needs the original targets table)
+python design.py --feedback results/report/HK_balancing_feedback.json --targets design/targets/housekeeping.tsv \
+    --output-prefix design/output/hk_v2
 ```
 
-Defaults: `--genome common_refs/ecoli_genome.fna`, `--gff common_refs/genomic.gff`, `--blast-db ncbi_data/ecoli_db` (built on first use).
+Optional: simulate reads with `analysis/generate_simulated_fastq.py` (also writes `<sample>.truth.tsv` listing the injected SNVs). Gene names from a GFF can be turned into a targets table with `scripts/genes_to_targets.py`.
 
 ---
 
-## 2. Design (`design.py`)
+## 2. Targets table
+
+One TSV row per target. Only `name` is always required; give **either** a region (`reference` + `start` + `end`, 1-based inclusive, cut from `--reference`) **or** a raw `sequence`.
+
+| Column | Meaning |
+|---|---|
+| `name` | unique target name |
+| `reference`, `start`, `end` | region on a contig/transcript in `--reference` |
+| `sequence` | raw sequence instead of a region (`reference`/`start` then only set output coordinates) |
+| `junctions` | comma-separated positions: **a primer must overlap each-or-one of these joins**. Give the 1-based position of the first base *after* the join (exon 2 starts at base 201 of the cDNA → `201`) |
+| `span` | ranges the **amplicon must contain**, e.g. `140-160,300` |
+| `avoid` | ranges **no primer may overlap**, e.g. `1-40` (SNPs, repeats, low complexity) |
+| `amplicon_min`, `amplicon_max` | per-target size range (defaults `--amplicon-min/max`, 150–250) |
+| `max_hits` | allowed exact hits per primer in each specificity database (default `--max-hits 1`; raise for isoforms or multi-copy genes) |
+
+All positions in `junctions`/`span`/`avoid` are 1-based within the target sequence. Unsatisfiable constraints are reported per target, not silently ignored.
+
+```mermaid
+flowchart LR
+    ROW["targets.tsv row"] --> RES["resolve: cut region from --reference<br/>or take raw sequence"]
+    RES --> P3["primer3 with constraints<br/>junction overlap, amplicon span, excluded regions"]
+    P3 --> SP["BLAST each primer against every<br/>--specificity-fasta, exact full-length hits"]
+    SP --> IP["in-silico PCR per database:<br/>predicted_products column"]
+    SP --> DF["dimer filters, then packing"]
+```
+
+### DNA targets
+Point `--reference` at the genome and list regions; the default specificity database is the reference itself. Use `avoid` to keep primers off known variants and `span` to force an amplicon to cover a site of interest.
+
+### RNA targets
+Design on the **transcript** and screen against **both transcriptome and genome**, so genomic-DNA amplification is visible:
+
+```bash
+python scripts/make_rna_example.py --outdir examples/rna_junction     # synthetic 3-exon gene
+python design.py --targets examples/rna_junction/targets.tsv --reference examples/rna_junction/cdna.fa \
+    --specificity-fasta examples/rna_junction/cdna.fa examples/rna_junction/genome.fa
+```
+
+| Target (same 650 nt transcript) | specificity hits (cDNA/genome) | `predicted_products` |
+|---|---|---|
+| `TX1_plain`, no constraint | F 1/1, R 1/1 | `cdna:TX1:91;genome:chrG:91`: **genomic DNA gives the same-size product** |
+| `TX1_junction`, `junctions=201,401` | F **1/0**, R 1/1 | `cdna:TX1:88`: the junction-spanning primer cannot prime on genomic DNA |
+
+For RNA also align to the transcript FASTA in the pipeline (`--genome cdna.fa`); RT and library chemistry are the wet-lab side.
+
+---
+
+## 3. Design (`design.py`)
 
 ### Per-target logic
 
 ```mermaid
 flowchart TD
-    S["Gene sequence from GFF + FASTA"] --> P["primer3: N candidate pairs"]
-    P --> B["one blastn call per batch<br/>exact full-length hits only"]
-    B --> C1["≤ 1 genomic hit<br/>(BLAST errors fail closed)"]
+    S["target sequence + constraints"] --> P["primer3: N candidate pairs"]
+    P --> B["one blastn call per database per batch<br/>exact full-length hits only"]
+    B --> C1["≤ max_hits in EVERY database<br/>(BLAST errors fail closed)"]
     C1 --> C2["self-dimer ≥ -9.0"]
     C2 --> C3["F/R heterodimer ≥ -8.0"]
     C3 --> C4["3' end stability ≥ -6.0, both directions"]
     C4 --> OK["keep pair"]
     P -. "none pass" .-> FB["fallback strategies S1 longer / S2 shorter / S3 relaxed Tm"]
-    FB -. "none pass" .-> R["--rescue: shift window ±25, ±45 bp"]
+    FB -. "none pass" .-> R["--rescue: shift window ±25, ±45 bp<br/>(unconstrained region targets only)"]
     R -. "none pass" .-> X["reported as failed"]
 ```
 
@@ -67,7 +113,7 @@ flowchart TD
 |---|---|
 | Reaction conditions (applied to every primer3 call) | 2.5 mM Mg²⁺, 1.2 mM dNTP, 50 mM Na⁺, 50 nM DNA (KAPA HiFi) |
 | Primer | 19–21 nt, Tm 59–61 °C (fallback 55–65), GC 40–60 % |
-| Amplicon | 150–250 bp (fallback 100–350); must fit inside the gene |
+| Amplicon | 150–250 bp by default, per target via `amplicon_min/max` (fallbacks widen or narrow it); must fit inside the target |
 | Dimer limits (kcal/mol) | self −9.0, heterodimer −8.0, 3′ end −6.0 (`--max-*-dg`) |
 
 ### Packing into pools
@@ -88,28 +134,31 @@ Overlapping amplicons (tiled designs) are never put in the same pool, so they ca
 | File | Content |
 |---|---|
 | `<prefix>_order.csv` | `pool,name,sequence`: one row per oligo, ready to paste into a vendor order form |
-| `<prefix>_pool_N.csv` | per-pair details: primers, Tm, amplicon coordinates, BLAST hit counts |
-| `<prefix>_pool_N.bed` | amplicon intervals (names like `gene_amplicon_S0_3`) |
-| `<prefix>_pool_N_trimming.fasta` | primers named `<gene>_F` / `<gene>_R` for read trimming |
+| `<prefix>_pool_N.csv` | per-pair details: primers, Tm, amplicon coordinates, hit counts per database, `predicted_products` (in-silico PCR from exact hits, ≤ `--max-product`) |
+| `<prefix>_pool_N.bed` | amplicon intervals on the reference (names like `target_amplicon_S0_3`) |
+| `<prefix>_pool_N_trimming.fasta` | primers named `<target>_F` / `<target>_R` for read trimming |
 | `<prefix>_failed_targets.txt` | targets that failed, or did not fit under `--force-single-pool` |
 
 ### Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
+| `--reference` | E. coli | FASTA(s) that region targets are cut from |
+| `--specificity-fasta` | the reference | FASTA(s) to screen primers against (give transcriptome **and** genome for RNA) |
+| `--max-hits` | 1 | allowed exact hits per primer per database |
 | `--num-candidates` | 25 | pairs designed per target |
 | `--monte-carlo-iters` / `--seed` | 20 / 0 | packing restarts / reproducibility |
 | `--force-single-pool` | off | keep the largest compatible set; list the rest |
 | `--force-sparse` | off | never allow overlapping amplicons in one pool |
 | `--force-multiprime` | off | allow multi-copy primers (e.g. 16S) |
-| `--rescue` | off | shift the window if no pair passes |
+| `--rescue` | off | shift the window of unconstrained region targets if no pair passes |
 | `--add-hairpin-clamp` | off | experimental 5′ hairpin stem; see note below |
 
 > **Hairpin clamp:** a 5′ extension intended to suppress primer dimers. It is untested here (no wet-lab or simulation evidence it helps) and unrelated to mini-amplicons, which only pool splitting prevents. Treat as experimental.
 
 ---
 
-## 3. Analysis (`analysis/main.nf`)
+## 4. Analysis (`analysis/main.nf`)
 
 ```mermaid
 flowchart TD
@@ -150,13 +199,13 @@ flowchart LR
 
 ---
 
-## 4. Feedback loop
+## 5. Feedback loop
 
 ```mermaid
 flowchart LR
     COV["per-target coverage"] --> REL["R = target mean / panel mean"]
     REL --> ACT{"R"}
-    ACT -- "0" --> RD["FLAG FOR REDESIGN<br/>gene recovered from amplicon name,<br/>redesigned with --rescue"]
+    ACT -- "0" --> RD["FLAG FOR REDESIGN<br/>target recovered from the amplicon name,<br/>redesigned with --rescue"]
     ACT -- "< 0.5" --> UP["INCREASE ×1/R (max 10)"]
     ACT -- "0.5 to 2" --> KEEP["maintain"]
     ACT -- "> 2" --> DOWN["DECREASE ×1/R (min 0.1)"]
@@ -165,7 +214,7 @@ flowchart LR
 
 ---
 
-## 5. Ordering and running the primers
+## 6. Ordering and running the primers
 
 * Order `<prefix>_order.csv` oligos as standard primers (desalted is fine for PCR; plate format is convenient). Pool by the `pool` column.
 * One pool = one PCR tube. Overlapping amplicons are already in different pools.
@@ -173,17 +222,18 @@ flowchart LR
 
 ---
 
-## 6. Verified results
+## 7. Verified results
 
 Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml` (simulated reads, 300×).
 
 | Test | Result |
 |---|---|
-| 21-gene panel | 1 pool, every primer has exactly 1 perfect genomic hit |
+| 21-gene panel | 1 pool, every primer has exactly 1 perfect genomic hit, no predicted off-target products |
+| Synthetic spliced gene, real BLAST | junction-constrained target: no genomic product predicted; unconstrained: same-size genomic product flagged (table in section 2) |
 | Pipeline | 10 processes succeed in ~1.5 min; 6,299 / 6,300 pairs retained after trimming |
 | Panel coverage | mean 397×, fold-80 1.33, 100 % of targets above 0.2× |
 | Variants (47 injected SNVs) | 40 called, 0 false positives; all 7 misses lie under primers (trimmed by design), 0 in amplicon interiors |
-| Unit tests | 25 passing; CI runs unit tests plus a real pipeline run on a small fixture |
+| Unit tests | 36 passing; CI runs them plus a real-BLAST design smoke test and a real pipeline run on a small fixture |
 
 ```mermaid
 pie showData
@@ -192,18 +242,18 @@ pie showData
     "Missed, under a primer (not callable)" : 7
 ```
 
-**Limitations.** Variant calling is validated only on simulated reads (identical copies per amplicon, 0.1 % error). Genes shorter than the minimum amplicon cannot be designed. BLAST screening counts exact full-length hits only (3′-mismatch near-hits are not scored). Packing is randomised first-fit, not optimal. Primers are not checked for cross-products between non-overlapping amplicons in the same pool.
+**Limitations.** Variant calling is validated only on simulated reads (identical copies per amplicon, 0.1 % error). Targets shorter than the minimum amplicon cannot be designed (lower `amplicon_min` for them). BLAST screening counts exact full-length hits only (3′-mismatch near-hits are not scored). Packing is randomised first-fit, not optimal. Within a pool, cross-products between different targets' primers are not yet checked (per-pair `predicted_products` covers each pair only).
 
 ---
 
-## 7. Repository
+## 8. Repository
 
 ```mermaid
 flowchart TD
     R["repo"] --> D["design.py"]
     R --> C["core/biophysics.py"]
     R --> A["analysis/<br/>main.nf, nextflow.config, balance.py, plot_uniformity.py,<br/>analysis_utils.py, generate_simulated_fastq.py"]
-    R --> S["scripts/make_test_fixture.py"]
+    R --> S["scripts/<br/>make_test_fixture.py, make_rna_example.py, genes_to_targets.py"]
     R --> X["design/targets/, common_refs/ (E. coli K-12 genome + GFF)"]
     R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
 ```

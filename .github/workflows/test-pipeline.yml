@@ -53,6 +53,23 @@ jobs:
           samtools --version | head -1
           cutadapt --version
 
+      - name: Design smoke test with real BLAST (RNA junction example)
+        shell: micromamba-shell {0}
+        run: |
+          EX="$RUNNER_TEMP/rna"
+          python scripts/make_rna_example.py --outdir "$EX"
+          python design.py --targets "$EX/targets.tsv" --reference "$EX/cdna.fa" \
+            --specificity-fasta "$EX/cdna.fa" "$EX/genome.fa" \
+            --blast-dir "$EX/db" --output-prefix "$EX/out" --num-candidates 20
+          python - <<PY
+          import csv, os
+          rows = {r["target_id"]: r for r in csv.DictReader(open(os.environ["RUNNER_TEMP"] + "/rna/out_pool_1.csv"))}
+          plain, junc = rows["TX1_plain"], rows["TX1_junction"]
+          assert "genome:" in plain["predicted_products"], "unconstrained design should show a genomic product"
+          assert "genome:" not in junc["predicted_products"], "junction-spanning design must not amplify genomic DNA"
+          print("junction constraint removes genomic product:", junc["predicted_products"])
+          PY
+
       - name: Build test fixture (genome slice, BED, primers, simulated reads)
         shell: micromamba-shell {0}
         run: python scripts/make_test_fixture.py --outdir "$RUNNER_TEMP/fixture"

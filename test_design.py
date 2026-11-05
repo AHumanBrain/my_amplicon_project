@@ -18,64 +18,75 @@ sys.path[:0] = [ROOT, os.path.join(ROOT, "analysis"), os.path.join(ROOT, "script
 import design  # noqa: E402
 
 
-def fake_blast(monkeypatch, specific=True):
+DBS = [("db", "db")]
+
+
+def fake_blast(monkeypatch, count=1, locs=()):
     monkeypatch.setattr(design, "run_blast_batch",
-                        lambda seqs, db, **k: {q: (1 if specific else 2, [], specific, None) for q in seqs})
+                        lambda seqs, db, **k: {q: (count, list(locs)) for q in seqs})
 
 
 @pytest.fixture
 def genome():
     rng = random.Random(7)
     seq = "".join(rng.choice("ACGT") for _ in range(6000))
-    recs = {"chr": SeqRecord(Seq(seq), id="chr")}
-    genes = {"g1": {"contig": "chr", "start": 500, "end": 1000, "strand": "+"},
-             "g2": {"contig": "chr", "start": 3000, "end": 3500, "strand": "+"}}
-    return recs, genes
+    return {"chr": SeqRecord(Seq(seq), id="chr")}
 
 
-def design_target(genome, tid, **kw):
-    recs, genes = genome
-    return design.process_single_target(tid, recs, genes, "db", False, num_candidates=10, **kw)
+def make_target(genome, name="g1", start=501, end=1000, **extra):
+    row = {"name": name, "reference": "chr", "start": str(start), "end": str(end), **extra}
+    t, err = design.resolve_target(row, genome)
+    assert err is None, err
+    return t
 
 
-# ---------------------------------------------------------------- inputs
-class TestInputs:
-    def test_parse_gff(self, tmp_path):
-        f = tmp_path / "t.gff"
-        f.write_text("##gff-version 3\n"
-                     "c\tR\tgene\t190\t255\t.\t+\t.\tID=g1;Name=thrL;locus_tag=b0001\n"
-                     "c\tR\tCDS\t190\t255\t.\t+\t0\tParent=g1\n"
-                     "c\tR\tgene\t100\t500\t.\t-\t.\tID=g2;locus_tag=b9999\n")
-        genes = design.parse_gff(str(f))
-        assert genes["thrL"] == {"contig": "c", "start": 190, "end": 255, "strand": "+"}
-        assert genes["b9999"]["strand"] == "-"
+def design_target(genome, name="g1", start=501, end=1000, extra=None, **kw):
+    t = make_target(genome, name, start, end, **(extra or {}))
+    return design.process_single_target(t, genome, DBS, num_candidates=10, **kw)
 
-    def test_parse_empty_gff(self, tmp_path):
-        f = tmp_path / "e.gff"
-        f.write_text("##gff-version 3\n")
-        assert design.parse_gff(str(f)) == {}
 
-    def test_extract_sequence_and_errors(self):
-        recs = {"c": SeqRecord(Seq("ATGC" * 50), id="c")}
-        genes = {"g": {"contig": "c", "start": 1, "end": 8, "strand": "+"},
-                 "x": {"contig": "nope", "start": 1, "end": 4, "strand": "+"}}
-        assert design.extract_target_sequence(recs, genes, "g")[0] == "ATGCATGC"
-        assert "not found" in design.extract_target_sequence(recs, genes, "missing")[2]
-        assert "not found" in design.extract_target_sequence(recs, genes, "x")[2]
+# ---------------------------------------------------------------- targets table
+class TestTargets:
+    def test_read_targets_validates(self, tmp_path):
+        f = tmp_path / "t.tsv"
+        f.write_text("# c\nname\treference\tstart\tend\na\tchr\t1\t100\n")
+        assert design.read_targets(str(f))[0]["name"] == "a"
+        f.write_text("name\tbogus\na\t1\n")
+        with pytest.raises(ValueError, match="unknown column"):
+            design.read_targets(str(f))
+        f.write_text("name\nA\nA\n")
+        with pytest.raises(ValueError, match="duplicate"):
+            design.read_targets(str(f))
 
-    def test_target_list_skips_blank_and_comments(self, tmp_path):
-        f = tmp_path / "t.txt"
-        f.write_text("a\n\n# c\nb\n")
-        assert design.parse_target_list(str(f)) == ["a", "b"]
+    def test_resolve_coordinates_and_sequence(self, genome):
+        t = make_target(genome, start=101, end=160)
+        assert t["seq"] == str(genome["chr"].seq[100:160]).upper() and t["offset"] == 100
+        raw, err = design.resolve_target({"name": "r", "sequence": "acgt" * 40}, genome)
+        assert err is None and raw["seq"] == "ACGT" * 40 and raw["contig"] == "r" and not raw["coordinate_based"]
+
+    def test_resolve_errors(self, genome):
+        for row, msg in [({"name": "x", "reference": "nope", "start": "1", "end": "9"}, "not found"),
+                         ({"name": "x", "reference": "chr", "start": "5990", "end": "7000"}, "outside"),
+                         ({"name": "x"}, "either"),
+                         ({"name": "x", "sequence": "ACGT" * 30, "junctions": "500"}, "junctions"),
+                         ({"name": "x", "sequence": "ACGT" * 30, "span": "0-5"}, "within"),
+                         ({"name": "x", "sequence": "ACGT" * 30, "amplicon_min": "300", "amplicon_max": "100"}, "amplicon")]:
+            t, err = design.resolve_target(row, genome)
+            assert t is None and msg in err, (row, err)
+
+    def test_constraint_conversion(self, genome):
+        t = make_target(genome, junctions="141", span="10-19,50", avoid="30-39")
+        assert t["junctions"] == [139]            # primer3 wants index of last base before the join
+        assert t["span"] == [(9, 10), (49, 1)] and t["avoid"] == [(29, 10)]
 
     def test_names(self):
         assert design.sanitize_name("a b(c)") == "a_b_c"
-        assert design.target_gene_id("gyrB_amplicon_S0_3") == "gyrB"
+        assert design.target_name_from_amplicon("gyrB_amplicon_S0_3") == "gyrB"
 
 
-# ---------------------------------------------------------------- BLAST
-class TestBlast:
-    def test_batch_parses_and_flags_nonspecific(self, monkeypatch):
+# ---------------------------------------------------------------- specificity
+class TestSpecificity:
+    def test_batch_parses_hits(self, monkeypatch):
         class P:
             stdout = "q0\tchr\t10\t30\nq1\tchr\t5\t25\nq1\tchr\t900\t920\n"
 
@@ -85,59 +96,145 @@ class TestBlast:
 
         monkeypatch.setattr(subprocess, "run", run)
         res = design.run_blast_batch(["AAAA", "CCCC"], "db")
-        assert res["AAAA"][2] is True and res["AAAA"][0] == 1
-        assert res["CCCC"][2] is False and "2 hits" in res["CCCC"][3]
+        assert res["AAAA"] == (1, [("chr", 10, 30)]) and res["CCCC"][0] == 2
 
-    def test_failure_fails_closed(self, monkeypatch):
+    def test_failure_is_unknown_not_zero(self, monkeypatch):
         def boom(*a, **k):
             raise subprocess.CalledProcessError(1, "blastn")
 
         monkeypatch.setattr(subprocess, "run", boom)
-        assert design.run_blast_batch(["AAAA"], "db")["AAAA"][2] is False
+        assert design.run_blast_batch(["AAAA"], "db")["AAAA"] == (None, [])
+
+    def test_predict_products(self):
+        f = [("c", 100, 119)]                       # forward-strand hit
+        r = [("c", 349, 330)]                       # reverse-strand hit (sstart > send)
+        assert design.predict_products(f, r) == [("c", 250)]
+        assert design.predict_products(f, r, max_product=200) == []
+        assert design.predict_products(f, [("d", 349, 330)]) == []          # other contig
+        assert design.predict_products(f, [("c", 50, 69)]) == []             # same strand
+        assert design.predict_products([("c", 500, 519)], [("c", 349, 330)]) == []  # not facing
 
 
-# ---------------------------------------------------------------- design + packing
+# ---------------------------------------------------------------- design
 class TestDesign:
     def test_primer3_runs(self):
         rng = random.Random(1)
         seq = "".join(rng.choice("ACGT") for _ in range(400))
-        res = design.design_primers_for_sequence(seq, "t", {}, num_candidates=3)
-        assert "PRIMER_PAIR_NUM_RETURNED" in res
+        assert "PRIMER_PAIR_NUM_RETURNED" in design.design_primers_for_sequence(seq, "t", 3)
 
     def test_candidates_are_complete(self, genome, monkeypatch):
         fake_blast(monkeypatch)
-        _, cands, err = design_target(genome, "g1")
+        _, cands, err = design_target(genome)
         assert err is None and cands
         c = cands[0]
-        assert c["end"] - c["start"] == c["size"]
-        assert " " not in c["name"] and "(" not in c["name"]
-        assert c["fwd_oligo"] == c["fwd"] and c["flags"] == "OK"
+        assert c["end"] - c["start"] == c["size"] and 501 - 1 <= c["start"] < 1000
+        assert " " not in c["name"] and c["fwd_oligo"] == c["fwd"] and c["flags"] == "OK"
         assert [x["sort_key"] for x in cands] == sorted(x["sort_key"] for x in cands)
+        assert c["hits"] == "F:1 R:1"
 
-    def test_nonspecific_primers_rejected(self, genome, monkeypatch):
-        fake_blast(monkeypatch, specific=False)
-        _, cands, err = design_target(genome, "g1")
-        assert cands == [] and "No specific" in err
+    def test_amplicon_range_is_per_target(self, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        _, cands, _ = design_target(genome, start=501, end=1000, extra={"amplicon_min": "70", "amplicon_max": "110"})
+        assert cands and all(c["strategy"] > 0 or 70 <= c["size"] <= 110 for c in cands)
+        assert cands[0]["strategy"] == 0 and 70 <= cands[0]["size"] <= 110
+
+    def test_nonspecific_rejected_unless_max_hits_or_multiprime(self, genome, monkeypatch):
+        fake_blast(monkeypatch, count=2)
+        assert design_target(genome)[1] == []
+        assert design_target(genome, extra={"max_hits": "2"})[1]
+        assert design_target(genome, force_multiprime=True)[1]
+
+    def test_every_database_is_checked(self, genome, monkeypatch):
+        monkeypatch.setattr(design, "run_blast_batch",
+                            lambda seqs, db, **k: {q: ((1 if db == "tx" else 3), []) for q in seqs})
+        t = make_target(genome)
+        two = [("tx", "tx"), ("genome", "genome")]
+        assert design.process_single_target(t, genome, two, num_candidates=10)[1] == []
+        assert design.process_single_target(t, genome, two[:1], num_candidates=10)[1]
+
+    def test_blast_failure_never_accepted(self, genome, monkeypatch):
+        monkeypatch.setattr(design, "run_blast_batch", lambda seqs, db, **k: {q: (None, []) for q in seqs})
+        assert design_target(genome, force_multiprime=True)[1] == []
 
     def test_missing_target_reported(self, genome, monkeypatch):
         fake_blast(monkeypatch)
-        _, cands, err = design_target(genome, "nope")
-        assert cands == [] and err
+        t = make_target(genome)
+        t["seq"] = ""
+        assert design.process_single_target(t, genome, DBS)[1] == []
+
+    def test_junction_constraint_forces_a_spanning_primer(self, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        # junction before 1-based base 141 of the target; amplicon range suits a 300 bp target
+        _, cands, err = design_target(genome, start=1001, end=1300,
+                                      extra={"junctions": "141", "amplicon_min": "70", "amplicon_max": "150"})
+        assert cands, err
+        j = 140  # 0-based index of the first base after the join, within the target
+        for c in cands:
+            f_lo, f_hi = c["start"] - 1000, c["start"] - 1000 + len(c["fwd"]) - 1
+            r_hi = c["end"] - 1000 - 1
+            r_lo = r_hi - len(c["rev"]) + 1
+            spans = lambda lo, hi: lo <= j - 1 and hi >= j  # noqa: E731
+            assert spans(f_lo, f_hi) or spans(r_lo, r_hi), c["name"]
+
+    def test_span_and_avoid_constraints(self, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        _, cands, err = design_target(genome, start=1001, end=1300,
+                                      extra={"span": "140-160", "avoid": "1-40", "amplicon_min": "70", "amplicon_max": "200"})
+        assert cands, err
+        for c in cands:
+            lo, hi = c["start"] - 1001, c["end"] - 1001   # 0-based half-open within the target
+            assert lo <= 139 and hi >= 160                  # amplicon contains 140-160
+            assert lo >= 40                                 # no primer in the avoided 1-40
+
+    def test_unsatisfiable_constraint_is_reported(self, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        _, cands, err = design_target(genome, start=1001, end=1100,
+                                      extra={"span": "1-100", "amplicon_min": "40", "amplicon_max": "60"})
+        assert cands == [] and "constraints" in err
 
     def test_hairpin_clamp_is_optional_and_5prime(self, genome, monkeypatch):
         fake_blast(monkeypatch)
-        _, cands, _ = design_target(genome, "g1", hairpin_clamp=True)
-        c = cands[0]
-        assert c["fwd_oligo"].endswith(c["fwd"]) and "HairpinClamp" in c["flags"]
+        _, cands, _ = design_target(genome, hairpin_clamp=True)
+        assert cands[0]["fwd_oligo"].endswith(cands[0]["fwd"]) and "HairpinClamp" in cands[0]["flags"]
+
+    def test_rescue_only_for_unconstrained_coordinate_targets(self, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        real = design.design_primers_for_sequence
+        t = make_target(genome, start=501, end=1000)
+        # Make the original window undesignable; shifted windows are fine.
+        monkeypatch.setattr(design, "design_primers_for_sequence",
+                            lambda seq, *a, **k: {} if seq == t["seq"] else real(seq, *a, **k))
+        assert design.process_single_target(t, genome, DBS, num_candidates=5)[1] == []
+        cands = design.process_single_target(t, genome, DBS, num_candidates=5, rescue=True)[1]
+        assert cands and cands[0]["flags"].startswith("Rescued")
+        assert 500 - 45 <= cands[0]["start"] <= 1000 + 45
+        constrained = make_target(genome, start=501, end=1000, avoid="1-5")
+        monkeypatch.setattr(design, "design_primers_for_sequence",
+                            lambda seq, *a, **k: {} if seq == constrained["seq"] else real(seq, *a, **k))
+        assert design.process_single_target(constrained, genome, DBS, num_candidates=5, rescue=True)[1] == []
 
     def test_pack_is_deterministic_and_complete(self, genome, monkeypatch):
         fake_blast(monkeypatch)
-        m = {t: design_target(genome, t)[1] for t in ("g1", "g2")}
+        m = {n: design_target(genome, n, s, s + 499)[1] for n, s in (("g1", 501), ("g2", 3001))}
         a = design.pack_targets_first_fit(m, False, 5, seed=3)
         b = design.pack_targets_first_fit(m, False, 5, seed=3)
         ids = lambda pools: [[c["target_id"] for c in p] for p in pools]  # noqa: E731
         assert ids(a) == ids(b)
         assert sorted(t for p in ids(a) for t in p) == ["g1", "g2"]
+
+    def test_packing_does_not_depend_on_dict_insertion_order(self, monkeypatch):
+        # Workers finish in arbitrary order, so the packer must not shuffle in insertion order.
+        seen = []
+        real_sample = random.Random.sample
+        monkeypatch.setattr(random.Random, "sample",
+                            lambda self, pop, k: (seen.append(list(pop)), real_sample(self, pop, k))[1])
+        monkeypatch.setattr(design, "is_compatible", lambda *a: (False, "x"))  # force many pools: no early exit
+        cand = lambda t: [{"target_id": t, "contig": "c", "start": 0, "end": 1,  # noqa: E731
+                           "fwd": "ACGTACGTACGTAGCTAGCT", "rev": "TTGGCCAATTGGCCAATTGG"}]
+        names = ["t3", "t1", "t2", "t0"]
+        for order in (names, list(reversed(names))):
+            design.pack_targets_first_fit({n: cand(n) for n in order}, False, 3, seed=1)
+        assert seen and all(pop == sorted(pop) for pop in seen)
 
     def test_overlapping_amplicons_go_to_separate_pools(self):
         mk = lambda t, s, e: {"target_id": t, "contig": "c", "start": s, "end": e,  # noqa: E731
@@ -146,19 +243,12 @@ class TestDesign:
         assert not design.has_amplicon_overlap([mk("a", 0, 200), mk("b", 200, 400)])
         assert design.is_compatible(mk("b", 150, 350), [mk("a", 0, 200)], True) == (False, "amplicon overlap")
 
-    def test_cross_dimer_blocks_pool(self):
-        a = {"contig": "c", "start": 0, "end": 100, "fwd": "ACGTACGTACGTAGCTAGCT", "rev": "ACGTACGTACGTAGCTAGCT"}
-        b = dict(a, start=500, end=600)
-        # identical primers are fully self-complementary enough to trip 3' dimer / heterodimer checks
-        ok, why = design.is_compatible(b, [a], False)
-        assert (ok, why) == (True, None) or why in ("3' end dimer", "heterodimer")
-
 
 # ---------------------------------------------------------------- outputs
 class TestOutputs:
     def test_write_outputs(self, genome, monkeypatch, tmp_path):
         fake_blast(monkeypatch)
-        m = {t: design_target(genome, t)[1] for t in ("g1", "g2")}
+        m = {n: design_target(genome, n, s, s + 499)[1] for n, s in (("g1", 501), ("g2", 3001))}
         pools = design.pack_targets_first_fit(m, False, 3, seed=0)
         prefix = str(tmp_path / "out")
         design.write_outputs(pools, prefix, ["g3 failed"])
@@ -172,6 +262,7 @@ class TestOutputs:
         assert fasta.startswith(f">{rows[0]['target_id']}_F\n{rows[0]['fwd_oligo']}\n")
         bed = open(f"{prefix}_pool_1.bed").read().split("\t")
         assert bed[0] == "chr" and int(bed[2]) > int(bed[1])
+        assert "predicted_products" in rows[0]
         assert "g3 failed" in open(f"{prefix}_failed_targets.txt").read()
 
 
@@ -189,21 +280,45 @@ class TestBiophysics:
 
 # ---------------------------------------------------------------- feedback loop
 class TestFeedback:
-    def test_redesign_maps_amplicon_to_gene(self, tmp_path, monkeypatch):
-        fb = {"target_recommendations": [
-            {"target_id": "gyrB_amplicon_S0_2", "rel_mean": 0.0, "recommended_adjustment": 10.0,
-             "action": "FLAG FOR REDESIGN"},
-            {"target_id": "recA_amplicon_S0_0", "rel_mean": 1.0, "recommended_adjustment": 1.0,
-             "action": "Maintain current concentration"}]}
-        f = tmp_path / "fb.json"
-        f.write_text(json.dumps(fb))
+    FB = {"target_recommendations": [
+        {"target_id": "gyrB_amplicon_S0_2", "rel_mean": 0.0, "recommended_adjustment": 10.0,
+         "action": "FLAG FOR REDESIGN"},
+        {"target_id": "recA_amplicon_S0_0", "rel_mean": 1.0, "recommended_adjustment": 1.0,
+         "action": "Maintain current concentration"}]}
+
+    def _args(self, tmp_path, targets):
+        (tmp_path / "fb.json").write_text(json.dumps(self.FB))
+        return argparse.Namespace(feedback=str(tmp_path / "fb.json"), output_prefix=str(tmp_path / "o"),
+                                  rescue=False, targets=targets)
+
+    def test_redesign_selects_flagged_target_rows(self, tmp_path, monkeypatch):
+        tsv = tmp_path / "panel.tsv"
+        tsv.write_text("name\treference\tstart\tend\ngyrB\tchr\t1\t500\nrecA\tchr\t600\t900\n")
         seen = {}
         monkeypatch.setattr(design, "run_design_mode", lambda a: seen.update(
-            targets=open(a.target_file).read().split(), rescue=a.rescue))
-        design.run_feedback_mode(argparse.Namespace(feedback=str(f), output_prefix=str(tmp_path / "o"), rescue=False))
-        assert seen == {"targets": ["gyrB"], "rescue": True}
-        rows = list(csv.DictReader(open(tmp_path / "o_rebalancing_recipe.csv")))
-        assert [r["Target"] for r in rows] == ["gyrB_amplicon_S0_2", "recA_amplicon_S0_0"]
+            rows=design.read_targets(a.targets), rescue=a.rescue, prefix=a.output_prefix))
+        design.run_feedback_mode(self._args(tmp_path, str(tsv)))
+        assert [r["name"] for r in seen["rows"]] == ["gyrB"] and seen["rescue"] is True
+        assert seen["prefix"].endswith("o_redesign")
+        recipe = list(csv.DictReader(open(tmp_path / "o_rebalancing_recipe.csv")))
+        assert [r["Target"] for r in recipe] == ["gyrB_amplicon_S0_2", "recA_amplicon_S0_0"]
+
+    def test_without_targets_only_recipe_is_written(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(design, "run_design_mode", lambda a: pytest.fail("must not redesign"))
+        design.run_feedback_mode(self._args(tmp_path, None))
+        assert (tmp_path / "o_rebalancing_recipe.csv").exists()
+
+    def test_names_with_odd_characters_map_back(self, tmp_path, monkeypatch):
+        tsv = tmp_path / "panel.tsv"
+        tsv.write_text("name\treference\tstart\tend\ngyrB (v2)\tchr\t1\t500\n")
+        fb = {"target_recommendations": [{"target_id": "gyrB_v2_amplicon_S0_1", "rel_mean": 0.0,
+                                          "recommended_adjustment": 10.0, "action": "FLAG FOR REDESIGN"}]}
+        (tmp_path / "fb.json").write_text(json.dumps(fb))
+        seen = {}
+        monkeypatch.setattr(design, "run_design_mode", lambda a: seen.update(rows=design.read_targets(a.targets)))
+        design.run_feedback_mode(argparse.Namespace(feedback=str(tmp_path / "fb.json"), targets=str(tsv),
+                                                    output_prefix=str(tmp_path / "o"), rescue=False))
+        assert seen["rows"][0]["name"] == "gyrB (v2)"
 
 
 # ---------------------------------------------------------------- analysis scripts
@@ -249,6 +364,17 @@ class TestSimulatorAndFixture:
         assert fasta[0] == ">t1_F" and len(fasta[1]) == fx.PRIMER_LEN
         for f in ("genome.fna", "targets.bed", "FixtureSample_R1.fastq.gz", "FixtureSample_R2.fastq.gz"):
             assert os.path.exists(os.path.join(out, f))
+
+
+def test_genes_to_targets(tmp_path):
+    gff = tmp_path / "a.gff"
+    gff.write_text("##gff-version 3\nc\tR\tgene\t10\t99\t.\t+\t.\tID=g;Name=geneA;locus_tag=b1\n")
+    genes = tmp_path / "g.txt"
+    genes.write_text("geneA\n# skip\nmissing\n")
+    out = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "genes_to_targets.py"),
+                          "--gff", str(gff), "--genes", str(genes)], capture_output=True, text=True)
+    assert out.stdout.splitlines() == ["name\treference\tstart\tend", "geneA\tc\t10\t99"]
+    assert "missing" in out.stderr
 
 
 def test_no_undefined_names():
