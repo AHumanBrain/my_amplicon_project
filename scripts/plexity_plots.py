@@ -46,6 +46,13 @@ def end_label(ax, x, y, text, color, dy=1.0, dx=1.06, fs=8.5):
                 annotation_clip=False)
 
 
+def plain_xticks(ax):
+    """Readable plexity ticks on the log x axis (10, 30, 100, 300, 1000)."""
+    ax.set_xticks([10, 30, 100, 300, 1000])
+    ax.set_xticklabels(["10", "30", "100", "300", "1,000"])
+    ax.minorticks_off()
+
+
 def finish(fig, name, outdir, caption):
     fig.text(0.01, 0.005, caption, fontsize=7.6, color=INK2, va="bottom", ha="left", wrap=True)
     path = os.path.join(outdir, name)
@@ -76,6 +83,7 @@ def fig_dimers(res, outdir):
         ax.set_xscale("log")
         ax.set_yscale(scale, **({"linthresh": 1.0} if scale == "symlog" else {}))
         ax.set_xlim(10, 1000)
+        plain_xticks(ax)
         ax.set_xlabel("attempted plexity (targets, tiled design, 2 pools)")
         ax.set_ylabel(ylab)
         ax.set_title(title)
@@ -87,7 +95,7 @@ def fig_dimers(res, outdir):
             ax.set_ylim(0.0008, 120)
             ax.set_yticks([0.001, 0.01, 0.1, 1, 10, 100])
             ax.set_yticklabels(["0.001", "0.01", "0.1", "1", "10", "100"])
-    fig.suptitle("Primer-dimer potential grows ~N² with plexity; chemistry, not screening, is what flattens it",
+    fig.suptitle("Primer-dimer potential grows ~N²: screening flattens it by discarding targets, chemistry flattens it without losing any",
                  x=0.06, ha="left", y=0.985, fontsize=13, fontweight="semibold")
     return finish(fig, "fig1_dimer_potential_vs_plexity.png", outdir,
                   "Model: nearest-neighbour 3′-end ΔG (primer3, KAPA salts) → pair occupancy c/(c+Kd). 'Risky' = occupancy ≥ 0.42% (the tool's −6 kcal/mol at 37 °C, 250 nM). "
@@ -96,56 +104,68 @@ def fig_dimers(res, outdir):
 
 
 def fig_capacity(res, outdir):
-    fig, ax = plt.subplots(figsize=(8.6, 5.4))
-    fig.subplots_adjust(left=0.09, right=0.76, top=0.86, bottom=0.25)
-    specs = [("firstfit_plain", ORANGE, "o", "-", "first-fit, plain limit"), ("repair_plain", AQUA, "s", "-", "first-fit + repair, plain limit"),
-             ("firstfit_rescue", ORANGE, "o", "--", "first-fit, hot-start/60 °C/50 nM limit"),
-             ("repair_rescue", AQUA, "s", "--", "repair, hot-start/60 °C/50 nM limit")]
-    ax.axhline(100, color=INK2, lw=1, ls=":")
-    for sc, color, mk, ls, label in specs:
+    fig, ax = plt.subplots(figsize=(8.8, 5.4))
+    fig.subplots_adjust(left=0.09, right=0.70, top=0.86, bottom=0.25)
+    resc = [100.0 * res["scenarios"][sc][-1]["placed"] / res["scenarios"][sc][-1]["N"]
+            for sc in ("firstfit_rescue", "repair_rescue") if sc in res["scenarios"]]
+    ax.axhline(100, color=INK2, lw=1.2, ls="--", zorder=1)
+    ax.text(11.2, 103.2, f"hot-start / 60 °C / 50 nM limit: {min(resc):.1f}–{max(resc):.0f}% placed, both searches" if resc else "",
+            color=INK2, fontsize=8.8, va="bottom")
+    specs = [("firstfit_plain", ORANGE, "o", "first-fit"), ("repair_plain", AQUA, "s", "first-fit + repair")]
+    for sc, color, mk, label in [sp for sp in specs if sp[0] in res["scenarios"]]:
         rows = res["scenarios"][sc]
         x = [r["N"] for r in rows]
         y = [100.0 * r["placed"] / r["N"] for r in rows]
-        line(ax, x, y, color, mk, label, ls=ls)
-    ends = {sc: 100.0 * res["scenarios"][sc][-1]["placed"] / res["scenarios"][sc][-1]["N"] for sc, *_ in specs}
-    ax.annotate(f"first-fit + repair, plain limit  {ends['repair_plain']:.0f}%", xy=(935, ends["repair_plain"]), xytext=(1100, ends["repair_plain"] + 4),
-                color=INK2, fontsize=8.5, annotation_clip=False)
-    ax.annotate(f"first-fit, plain limit  {ends['firstfit_plain']:.0f}%", xy=(935, ends["firstfit_plain"]), xytext=(1100, ends["firstfit_plain"] - 5),
-                color=INK2, fontsize=8.5, annotation_clip=False)
-    ax.annotate("hot-start / 60 °C / 50 nM limit  ~100%", xy=(935, 98), xytext=(1100, 92), color=INK2, fontsize=8.5, annotation_clip=False)
+        line(ax, x, y, color, mk, label + ", plain limit (−6 kcal/mol, 37 °C, 250 nM)")
+        dy = 5.5 if sc == "repair_plain" else -5.5          # keep the two end labels apart
+        ax.annotate(f"{label}: {y[-1]:.0f}% placed", xy=(x[-1], y[-1]), xytext=(x[-1] * 1.07, y[-1] + dy), color=INK2,
+                    fontsize=8.8, va="center", annotation_clip=False)
     ax.set_xscale("log")
     ax.set_xlim(10, 1000)
-    ax.set_ylim(0, 108)
+    plain_xticks(ax)
+    ax.set_ylim(0, 112)
     ax.set_xlabel("attempted plexity (tiled tiles)")
     ax.set_ylabel("% of targets that can be placed")
-    ax.set_title("A brute-force primer search runs out of room under the plain dimer limit")
-    ax.legend(loc="lower left", fontsize=8.3, ncol=1, bbox_to_anchor=(0.0, -0.02))
+    ax.set_title("Under the plain dimer limit a brute-force search places only ~30% of a 1,000-plex tiling", fontsize=10.5)
+    ax.legend(loc="lower left", fontsize=8.5, bbox_to_anchor=(0.0, -0.02))
     return finish(fig, "fig2_capacity_vs_plexity.png", outdir,
                   "Greedy per-pool selection from 25 candidates/tile (genome order); 'repair' moves one blocking member to an alternative. Tiled windows leave few distinct primers per tile\n"
                   "(tile 11: 10 left / 3 right primers sharing one motif), so one early pick can block a neighbour. A joint search could place more. In silico only.")
 
 
 def fig_uniformity(res, outdir):
-    fig, ax = plt.subplots(figsize=(9.0, 5.5))
-    fig.subplots_adjust(left=0.085, right=0.78, top=0.86, bottom=0.22)
-    for lv in ("L0", "L1", "L3", "L4"):
-        x, y = series(res, "naive", lv, "uniform_frac_ge_0p2")
+    fig, (ax, zx) = plt.subplots(1, 2, figsize=(13.4, 5.6), gridspec_kw={"width_ratios": [1.0, 1.0]})
+    fig.subplots_adjust(left=0.065, right=0.86, top=0.84, bottom=0.22, wspace=0.42)
+    sets = [("naive", "L0", LADDER_BLUE["L0"], "o", "-", "naive, plain"), ("naive", "L1", LADDER_BLUE["L1"], "s", "-", "naive + hot-start"),
+            ("naive", "L3", LADDER_BLUE["L3"], "^", "-", "naive + 50 nM primers"), ("naive", "L4", LADDER_BLUE["L4"], "v", "-", "naive + rebalanced conc."),
+            ("repair_plain", "L0", AQUA, "s", "--", "brute-force screened, plain")]
+    zoom_dy = {"naive + hot-start": -1.1, "naive + 50 nM primers": 0.0, "naive + rebalanced conc.": 0.9, "brute-force screened, plain": 2.2}
+    for sc, lv, color, mk, ls, label in sets:
+        x, y = series(res, sc, lv, "uniform_frac_ge_0p2")
         y = np.array(y) * 100
-        line(ax, x, y, LADDER_BLUE[lv], MARK[lv], "naive " + LADDER_NAME[lv])
-        ax.annotate(LADDER_NAME[lv] if lv != "L0" else "plain", xy=(x[-1], y[-1]), xytext=(x[-1] * 1.07, y[-1] + {"L0": 0, "L1": 1.6, "L3": -2.2, "L4": 2.2}[lv]),
-                    color=INK2, fontsize=8.5, va="center", annotation_clip=False)
-    x, y = series(res, "repair_plain", "L0", "uniform_frac_ge_0p2")
-    line(ax, x, np.array(y) * 100, AQUA, "s", "brute-force screened, plain", ls="--")
-    ax.set_xscale("log")
-    ax.set_xlim(10, 1000)
+        for a_ in (ax, zx):
+            line(a_, x, y, color, mk, label, ls=ls)
+        if label == "naive, plain":
+            ax.annotate(label, xy=(x[-1], y[-1]), xytext=(x[-1] * 1.07, y[-1]), color=INK2, fontsize=8.6, va="center", annotation_clip=False)
+        else:
+            zx.annotate(label, xy=(x[-1], y[-1]), xytext=(x[-1] * 1.07, y[-1] + zoom_dy[label]), color=INK2, fontsize=8.6, va="center", annotation_clip=False)
     ax.set_ylim(0, 105)
-    ax.set_xlabel("attempted plexity (tiled tiles)")
-    ax.set_ylabel("% of amplicons ≥ 0.2× mean coverage (model)")
-    ax.set_title("Uniformity collapses with dimers; stringency costs some back until primers are rebalanced")
+    zx.set_ylim(85, 104)
+    for a_ in (ax, zx):
+        a_.set_xscale("log")
+        a_.set_xlim(10, 1000)
+        plain_xticks(a_)
+        a_.set_xlabel("attempted plexity (tiled tiles)")
+        a_.set_ylabel("% of amplicons ≥ 0.2× mean coverage (model)")
+    ax.set_title("Full range")
+    zx.set_title("Zoom on the 85–100% band")
     ax.legend(loc="lower left", fontsize=8, bbox_to_anchor=(0.0, -0.02))
+    fig.suptitle("Uniformity collapses with dimers; stringency costs some back until primers are rebalanced", x=0.065, ha="left", y=0.985,
+                 fontsize=13, fontweight="semibold")
     return finish(fig, "fig3_uniformity_vs_plexity.png", outdir,
-                  "MODEL, uncalibrated: per-cycle efficiency e = 0.95 × target occupancy(F) × occupancy(R) × (1−dimer sequestration F)(1−dimer sequestration R); yield ∝ (1+e)^30; no plateau compression.\n"
-                  "Only relative comparisons are meaningful. Rebalancing sets each primer's concentration (10–250 nM) to equalise target occupancy, as the coverage-feedback loop does empirically.")
+                  "MODEL, uncalibrated: per-cycle efficiency e = 0.95 × target occupancy(F) × occupancy(R) × (1−dimer sequestration F)(1−dimer sequestration R); yield ∝ (1+e)^30; no plateau compression. "
+                  "Only relative comparisons are meaningful.\n"
+                  "Rebalancing sets each primer's concentration (10–250 nM) to equalise target occupancy, as the coverage-feedback loop does empirically. Brute-force screened places only 290/935 tiles (Fig 2).")
 
 
 def fig_ladder(res, outdir):
@@ -164,9 +184,6 @@ def fig_ladder(res, outdir):
             ax.plot(v, yp, "o", ms=11, color=LADDER_BLUE[k], markeredgecolor=SURFACE, markeredgewidth=1.5, zorder=3)
             txt = f"{v:,.0f}" if key == "risky_pairs" else (f"{v:.2g}" if key == "mean_seq" else f"{v:.0f}")
             ax.annotate(txt, xy=(v, yp), xytext=(8, 0), textcoords="offset points", fontsize=8.7, color=INK, va="center")
-        ax.set_yticks(ypos)
-        ax.set_yticklabels([LADDER_NAME[k] for k in keys] if i == 0 else [""] * len(keys))
-        ax.set_yscale("linear")
         ax.set_xscale(scale, **({"linthresh": 1.0} if scale == "symlog" else {}))
         if scale == "linear":
             ax.set_xlim(0, 115)
@@ -174,6 +191,9 @@ def fig_ladder(res, outdir):
             ax.set_xlim(1e-3, 300)
         else:
             ax.set_xlim(0, 4e4)
+        ax.set_ylim(-0.6, len(keys) - 0.4)
+        ax.set_yticks(ypos)                                   # after the scales, or matplotlib resets the ticks
+        ax.set_yticklabels([LADDER_NAME[k] for k in keys] if i == 0 else [""] * len(keys))
         ax.set_title(title)
         ax.grid(axis="y", visible=False)
     fig.suptitle(f"The chemistry ladder at {N}-plex (naive primers, 2 tiled pools): hot-start does most of the work",
@@ -240,20 +260,18 @@ def fig_offtarget(res, outdir, workdir):
             label = {"L0": "naive, plain", "L1": "naive + hot-start", "L3": "naive + full chemistry"}[lv]
             line(ax, x, y, color, MARK[lv], label)
             end_label(ax, x[-1], max(y[-1], 0.5), label, color)
-        if "repair_plain" in data:
-            x = [r["N"] for r in data["repair_plain"]]
-            y = [val("repair_plain", r, "L0") for r in data["repair_plain"]]
-            line(ax, x, y, AQUA, "s", "brute-force screened, plain", ls="--")
         ax.set_xscale("log")
         ax.set_yscale("symlog", linthresh=1.0)
         ax.set_xlim(10, 1000)
+        ax.set_ylim(bottom=0)
+        plain_xticks(ax)
         ax.set_xlabel("attempted plexity (tiled tiles)")
         ax.set_ylabel(ylab)
         ax.set_title(title)
-    fig.suptitle("Off-target priming: stringency removes almost all competitive sites", x=0.06, ha="left", y=0.985, fontsize=13, fontweight="semibold")
+    fig.suptitle("Off-target priming: hot-start cuts competitive sites ~3×, the full ladder ~28× (935-plex)", x=0.06, ha="left", y=0.985, fontsize=13, fontweight="semibold")
     return finish(fig, "fig5_offtarget_vs_plexity.png", outdir,
                   "Sites: BLAST near-matches (≥14 aligned bp incl. exact 3′ end, ≤2 mismatches) scored by primer–site duplex ΔG; 'competitive' = occupancy ≥ 5% of the primer's real target at that temperature and concentration.\n"
-                  "Products = facing sites in one pool within 1 kb that involve at least one off-target site; the geometric products between neighbouring designed primers (A faces C, ~600 bp) are subtracted. Genome: E. coli K-12 only (4.6 Mb); a human-scale genome has ~1000× more candidate sites. In silico only.")
+                  "Products = facing sites in one pool within 1 kb that involve at least one off-target site; the geometric products between neighbouring designed primers (A faces C, ~600 bp) are subtracted. Dimer screening does not select against off-target sites, so it is not shown. Genome: E. coli K-12 only (4.6 Mb); a human-scale genome has ~1000× more candidate sites. In silico only.")
 
 
 def write_table(res, outdir):
@@ -277,6 +295,9 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     res = json.load(open(os.path.join(a.workdir, "results.json")))
+    for fn in os.listdir(a.workdir):                       # newest per-scenario caches win over results.json
+        if fn.startswith("scenario_") and fn.endswith(".json"):
+            res["scenarios"][fn[len("scenario_"):-5]] = json.load(open(os.path.join(a.workdir, fn)))
     paths = [fig_dimers(res, a.outdir), fig_capacity(res, a.outdir), fig_uniformity(res, a.outdir), fig_ladder(res, a.outdir)]
     off = fig_offtarget(res, a.outdir, a.workdir)
     if off:
