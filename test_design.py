@@ -457,6 +457,52 @@ class TestSimulatorAndFixture:
             assert os.path.exists(os.path.join(out, f))
 
 
+class TestViewer:
+    def _row(self, tid, pool, start, end, strand="+"):
+        r = {"target_id": tid, "name": f"{tid}_amplicon_S0_0", "pool": pool, "contig": "c", "start": start,
+             "end": end, "strand": strand, "fwd_primer": "A" * 20, "rev_primer": "C" * 20}
+        fl, rl = 20, 20
+        r["f"], r["r"] = ((start, start + fl), (end - rl, end)) if strand == "+" else ((end - fl, end), (start, start + rl))
+        return r
+
+    def test_near_matches_filter_on_3prime_end_and_mismatches(self, monkeypatch):
+        import design_viewer as dv
+        # qseqid sseqid length mismatch gaps qstart qend sstart send qseq sseq
+        lines = "\n".join([
+            "p\tc\t17\t1\t0\t4\t20\t100\t116\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGT",   # ok (3' end aligned, last 4 match)
+            "p\tc\t17\t1\t0\t1\t17\t300\t316\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGT",   # 3' end not aligned (qend 17 != 20)
+            "p\tc\t17\t1\t0\t4\t20\t500\t516\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGA",   # last base mismatch
+            "p\tc\t17\t3\t0\t4\t20\t700\t716\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGT",   # too many mismatches
+            "p\tc\t12\t0\t0\t9\t20\t900\t911\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGT",   # too short
+            "p\tc\t17\t1\t0\t4\t20\t1016\t1000\tAAAAAAAAAAAAACGT\tAAAAAAAAAAAAACGT",  # minus strand, ok
+        ]) + "\n"
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: type("R", (), {"stdout": lines})())
+        sites = dv.near_matches({"p": "A" * 20}, "db", min_len=16, max_mismatch=2)
+        assert [(s["lo"], s["strand"]) for s in sites] == [(99, "+"), (999, "-")]
+
+    def test_own_site_is_excluded_and_unintended_products_are_found(self):
+        import design_viewer as dv
+        rows = [self._row("a", 1, 0, 200), self._row("b", 1, 5000, 5200), self._row("c", 2, 5000, 5200)]
+        sites = [{"primer": "a_F", "contig": "c", "lo": 0, "hi": 20, "strand": "+"},          # its own site
+                 {"primer": "b_R", "contig": "c", "lo": 600, "hi": 620, "strand": "-", "len": 17, "mm": 0}]
+        mis, products = dv.build(rows, sites, max_product=1000)
+        assert [m["primer"] for m in mis] == ["b_R"] and mis[0]["target"] == "b" and mis[0]["pool"] == 1
+        # a_F (+, 0-20) faces b_R's near-match site (-, 600-620): a 620 bp product in pool 1
+        assert any(p["a"] == "a_F" and p["b"] == "b_R" and p["size"] == 620 and p["pool"] == 1 for p in products)
+        # a target's own F+R pair is never reported, and pool 2's lone target has no partner
+        assert not any({p["a"], p["b"]} == {"a_F", "a_R"} for p in products)
+        assert not any(p["pool"] == 2 for p in products)
+
+    def test_minus_strand_footprints_and_tracks(self, tmp_path):
+        import design_viewer as dv
+        r = self._row("m", 1, 100, 300, "-")
+        assert r["f"] == (280, 300) and r["r"] == (100, 120)
+        dv.write_tracks(str(tmp_path), [r], [], [], "ref.fa")
+        bed = open(tmp_path / "amplicons.bed").read().splitlines()[1].split("\t")
+        assert bed[5] == "-" and bed[9] == "2" and bed[10] == "20,20" and bed[11] == "0,180"
+        assert (tmp_path / "session.xml").exists()
+
+
 def test_genes_to_targets(tmp_path):
     gff = tmp_path / "a.gff"
     gff.write_text("##gff-version 3\nc\tR\tgene\t10\t99\t.\t+\t.\tID=g;Name=geneA;locus_tag=b1\n")

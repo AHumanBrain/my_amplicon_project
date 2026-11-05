@@ -199,7 +199,7 @@ el('legend').innerHTML = D.pools.map(p=>`<span><i class="sw" style="background:$
 function overview(){
   const W=1100, out=[];
   D.contigs.forEach(c=>{
-    const x=p=>20+p/c.len*(W-40), tracks=D.pools.length+2, H=30+tracks*22;
+    const x=p=>20+p/c.len*(W-40), tracks=D.pools.length+2, H=56+tracks*22;
     let s=`<svg width="${W}" height="${H}" role="img" aria-label="overview of ${c.name}"><text x="20" y="14">${c.name}</text>`;
     s+=`<line x1="20" x2="${W-20}" y1="22" y2="22" stroke="var(--line)"/>`;
     for(let i=0;i<=10;i++){const p=c.len*i/10;s+=`<line x1="${x(p)}" x2="${x(p)}" y1="19" y2="25" stroke="var(--mut)"/><text x="${x(p)-14}" y="36">${(p/1e6).toFixed(2)}M</text>`}
@@ -234,6 +234,7 @@ function locus(t){
   const pad=600, lo=Math.max(0,t.start-pad), hi=t.end+pad, W=1100, x=p=>20+(p-lo)/(hi-lo)*(W-40);
   const near=D.sites.filter(q=>q.contig===t.contig&&q.hi>lo&&q.lo<hi);
   const prods=D.products.filter(q=>q.contig===t.contig&&q.hi>lo&&q.lo<hi);
+  const mine=D.sites.filter(q=>q.target===t.target);
   let s=`<svg width="${W}" height="190"><text x="20" y="12">${t.contig}:${fmt(lo)}-${fmt(hi)}</text><line x1="20" x2="${W-20}" y1="30" y2="30" stroke="var(--line)"/>`;
   for(let i=0;i<=6;i++){const p=lo+(hi-lo)*i/6;s+=`<line x1="${x(p)}" x2="${x(p)}" y1="27" y2="33" stroke="var(--mut)"/><text x="${x(p)-18}" y="44">${fmt(Math.round(p))}</text>`}
   s+=`<text x="2" y="66" style="font-size:10px">amplicon</text><rect x="${x(t.start)}" y="62" width="${x(t.end)-x(t.start)}" height="4" fill="${C[(t.pool-1)%C.length]}"/>`;
@@ -243,6 +244,7 @@ function locus(t){
   s+=`<text x="2" y="150" style="font-size:10px">products</text>`;
   prods.forEach((q,i)=>{const y=140+(i%3)*10;s+=`<rect x="${x(Math.max(q.lo,lo))}" y="${y}" width="${Math.max(2,x(Math.min(q.hi,hi))-x(Math.max(q.lo,lo)))}" height="5" fill="#d97706"><title>${q.a} + ${q.b}: ${q.size} bp</title></rect>`});
   el('locus').innerHTML=s+'</svg>'+`<div class="note">Blue arrows = designed primers (arrowhead = extension direction). Red/amber arrows = near-match priming sites in this window (amber = this target's own primers). ${near.length} site(s), ${prods.length} predicted product(s) in view.</div>`
+   +(mine.length?'<h2 style="margin-top:14px">Near-match sites of this target\'s primers (anywhere in the reference)</h2><table><tr><th>primer</th><th>location</th><th>strand</th><th>aligned bp</th><th>mismatches</th></tr>'+mine.map(q=>`<tr><td>${q.primer}</td><td>${q.contig}:${fmt(q.lo+1)}-${fmt(q.hi)}</td><td>${q.strand}</td><td>${q.len}</td><td>${q.mm}</td></tr>`).join('')+'</table>':'')
    +(prods.length?'<table>'+'<tr><th>pool</th><th>primer A</th><th>primer B</th><th>size</th></tr>'+prods.slice(0,15).map(q=>`<tr><td>${q.pool}</td><td>${q.a}${q.a_own?'':' (near-match)'}</td><td>${q.b}${q.b_own?'':' (near-match)'}</td><td>${q.size} bp</td></tr>`).join('')+'</table>':'');
   el('locusTitle').textContent='Locus view: '+t.target;
 }
@@ -259,7 +261,7 @@ def main():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--min-len", type=int, default=16, help="min aligned bases (default 16)")
     ap.add_argument("--max-mismatch", type=int, default=1)
-    ap.add_argument("--max-product", type=int, default=2000)
+    ap.add_argument("--max-product", type=int, default=1000, help="products up to this size are flagged (match design.py --max-cross-product)")
     a = ap.parse_args()
 
     rows = load_design(a.prefix)

@@ -8,7 +8,7 @@ Three things, and only these:
 2. **Pack** the primers into the fewest compatible pools
 3. **Analyse** amplicon sequencing (trim → align → coverage → variants) and feed coverage back into pool rebalancing
 
-Primers are plain oligos: order them from IDT, Twist, GenScript or anyone else. No adapter tails, no custom chemistry.
+Primers are ordinary oligos from IDT, Twist, GenScript or anyone else, each carrying a truncated Illumina tail (P5 on the forward/sense primer, P7 on the reverse/antisense primer; configurable, or `--no-tails`). A later index PCR completes the adapters. No custom chemistry.
 
 ```mermaid
 flowchart LR
@@ -52,6 +52,7 @@ One TSV row per target. Only `name` is always required; give **either** a region
 |---|---|
 | `name` | unique target name |
 | `reference`, `start`, `end` | region on a contig/transcript in `--reference` |
+| `strand` | `+` (default) or `-`: the sense strand of the RNA/gene relative to the given sequence or region. Design is done on the sense strand (forward primer = sense), so for `-` targets the sequence is reverse-complemented and all positions below are mapped back. Reverse primer = antisense = the RT primer for stranded RNA |
 | `sequence` | raw sequence instead of a region (`reference`/`start` then only set output coordinates) |
 | `junctions` | comma-separated positions: **a primer must overlap each-or-one of these joins**. Give the 1-based position of the first base *after* the join (exon 2 starts at base 201 of the cDNA → `201`) |
 | `span` | ranges the **amplicon must contain**, e.g. `140-160,300` |
@@ -127,16 +128,16 @@ flowchart LR
     A & N --> K["keep the run with fewest pools"]
 ```
 
-Overlapping amplicons (tiled designs) are never put in the same pool, so they cannot form mini-amplicons; sparse designs are packed purely on primer compatibility.
+Overlapping amplicons (tiled designs) are never put in the same pool. Facing primers from different targets are also kept apart (`--max-cross-product`): on a dense 52-target test the old overlap-only check left 36 such designed-primer products between 257 bp and 2 kb in the same pool. Everything else is packed on primer-dimer compatibility.
 
 ### Outputs (`--output-prefix`)
 
 | File | Content |
 |---|---|
-| `<prefix>_order.csv` | `pool,name,sequence`: one row per oligo, ready to paste into a vendor order form |
+| `<prefix>_order.csv` | `pool,name,sequence,role`: one row per oligo (tails included), ready for a vendor order form; `role` marks the antisense primer as the RT primer for stranded RNA |
 | `<prefix>_pool_N.csv` | per-pair details: primers, Tm, amplicon coordinates, hit counts per database, `predicted_products` (in-silico PCR from exact hits, ≤ `--max-product`) |
 | `<prefix>_pool_N.bed` | amplicon intervals on the reference (names like `target_amplicon_S0_3`) |
-| `<prefix>_pool_N_trimming.fasta` | primers named `<target>_F` / `<target>_R` for read trimming |
+| `<prefix>_pool_N_trimming.fasta` | gene-specific primers (no tails; reads start at the primer) named `<target>_F` / `<target>_R` |
 | `<prefix>_failed_targets.txt` | targets that failed, or did not fit under `--force-single-pool` |
 
 ### Flags
@@ -146,6 +147,8 @@ Overlapping amplicons (tiled designs) are never put in the same pool, so they ca
 | `--reference` | E. coli | FASTA(s) that region targets are cut from |
 | `--specificity-fasta` | the reference | FASTA(s) to screen primers against (give transcriptome **and** genome for RNA) |
 | `--max-hits` | 1 | allowed exact hits per primer per database |
+| `--max-cross-product` | 1000 | primers of **different** targets that face each other closer than this (bp) cannot share a pool; 0 disables |
+| `--fwd-tail` / `--rev-tail` / `--no-tails` | Illumina P5 / P7 20-mers | 5′ tails on the forward / reverse primer |
 | `--num-candidates` | 25 | pairs designed per target |
 | `--monte-carlo-iters` / `--seed` | 20 / 0 | packing restarts / reproducibility |
 | `--force-single-pool` | off | keep the largest compatible set; list the rest |
@@ -246,7 +249,17 @@ pie showData
 
 ---
 
-## 8. Repository
+## 8. Inspecting specificity
+
+```bash
+python scripts/design_viewer.py --prefix design/output/panel --reference common_refs/ecoli_genome.fna --outdir panel_view
+```
+
+Writes `specificity.html` (self-contained: genome overview, sortable target table, per-target locus view) plus IGV-loadable `amplicons.bed` (BED12, primers as blocks, coloured by pool), `mispriming_sites.bed`, `unintended_products.bed` and `session.xml` (IGV session; not tested in IGV desktop). It searches for **3′-anchored near-match priming sites** (default ≥ 16 aligned bp, ≤ 1 mismatch, exact last 4 bases) that exact-hit screening cannot see, and predicts products between any two facing sites in the same pool.
+
+---
+
+## 9. Repository
 
 ```mermaid
 flowchart TD
@@ -258,4 +271,4 @@ flowchart TD
     R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
 ```
 
-**Removed in this pruning** (all recoverable from git history): adapter tails and the tail-only mode, Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
+**Removed in this pruning** (all recoverable from git history): the tail-only mode and the second oligo format (tails themselves are back, see above), Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
