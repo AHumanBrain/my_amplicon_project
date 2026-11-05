@@ -1,22 +1,12 @@
 # Data (Large)
-raw_data/*
-!raw_data/.gitkeep
 ncbi_data/*
 !ncbi_data/.gitkeep
-results/*
-!results/.gitkeep
 # NOTE: the E. coli reference in common_refs/ is tracked on purpose (examples/CI).
 # Other genomes you add there are ignored:
 common_refs/*
 !common_refs/ecoli_genome.fna
 !common_refs/genomic.gff
 
-# Nextflow / Analysis
-.nextflow*
-work/
-analysis/work/
-analysis/.nextflow/
-analysis/.nextflow.log*
 
 # Python
 __pycache__/
@@ -24,19 +14,15 @@ __pycache__/
 *$py.class
 
 # Design Outputs (Ignore transient results)
-design/output/*
-!design/output/.gitkeep
+design/output/
 design/*.bed
 design/*.csv
 design/*.fasta
 design/*.txt
-design/ncbi_data/*
-!design/ncbi_data/.gitkeep
 
 # Logs
 *.log
 *.log.*
-design_production.log
 
 # OS
 .DS_Store
