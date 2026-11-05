@@ -16,8 +16,9 @@ import sys
 import numpy as np
 import primer3
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.join(ROOT, "scripts"))   # design_viewer
 import design  # noqa: E402
 from core.biophysics import BioConfig  # noqa: E402
 

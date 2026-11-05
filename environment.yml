@@ -6,20 +6,17 @@ channels:
 
 dependencies:
   - python=3.11
-  - nextflow>=25.04,<26
-  - fastqc
+  # design
+  - primer3-py
+  - biopython
+  - blast
+  - tqdm
+  # analysis: trimming, alignment, coverage
   - cutadapt
   - bwa
   - samtools
-  - picard
-  - gatk4
-  - multiqc
-  - openjdk=17
-  - matplotlib
-  - biopython
-  - primer3-py
-  - tqdm
-  - blast
   - numpy
+  - matplotlib
+  # checks
   - pytest
   - pyflakes

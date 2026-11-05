@@ -6,7 +6,7 @@ Three things, and only these:
 
 1. **Design** multiplex PCR primer panels (primer3 + BLAST+ + dimer screening)
 2. **Pack** the primers into the fewest compatible pools
-3. **Analyse** amplicon sequencing (trim → align → coverage → variants) and feed coverage back into pool rebalancing
+3. **Analyse** amplicon sequencing (trim → align → per-amplicon coverage) and feed coverage back into pool rebalancing
 
 Primers are ordinary oligos from IDT, Twist, GenScript or anyone else, each carrying a truncated Illumina tail (P5 on the forward/sense primer, P7 on the reverse/antisense primer; configurable, or `--no-tails`). A later index PCR completes the adapters. No custom chemistry.
 
@@ -16,7 +16,7 @@ flowchart LR
     D --> O["panel_order.csv<br/>pool, name, sequence"]
     D --> B["panel_pool_N.bed / .csv<br/>panel_pool_N_trimming.fasta"]
     O -. "order oligos, run PCR + sequence" .-> R["FASTQ reads"]
-    R & B --> N["analysis/main.nf"]
+    R & B --> N["analysis/analyze.py"]
     N --> F["report/*_balancing_feedback.json"]
     F -- "rebalancing recipe +<br/>redesign flagged targets" --> D
 ```
@@ -32,11 +32,11 @@ micromamba create -y -n amplicon_pipeline -f environment.yml && micromamba activ
 python design.py --targets design/targets/housekeeping.tsv --output-prefix design/output/hk
 
 # analyse sequencing of one pool
-nextflow run analysis/main.nf --reads "raw_data/HK_R{1,2}.fastq.gz" --genome common_refs/ecoli_genome.fna \
+python analysis/analyze.py --reads "raw_data/HK_R{1,2}.fastq.gz" --genome common_refs/ecoli_genome.fna \
     --bed design/output/hk_pool_1.bed --primers design/output/hk_pool_1_trimming.fasta --outdir results
 
 # rebalance + redesign flagged targets (needs the original targets table)
-python design.py --feedback results/report/HK_balancing_feedback.json --targets design/targets/housekeeping.tsv \
+python design.py --feedback results/HK/HK_balancing_feedback.json --targets design/targets/housekeeping.tsv \
     --output-prefix design/output/hk_v2
 ```
 
@@ -186,11 +186,11 @@ flowchart TD
 
 How far does a tiled design go as plexity grows, and what does chemistry buy back? The study designs **935 overlapping E. coli tiles** (of 1,000; 65 had no specific primer pair for a 230-300 bp amplicon) in two alternating pools with real primer3 and BLAST, then measures dimer potential, capacity, off-target priming and (modelled) uniformity from 10 to 935 targets. **Everything here is in silico; nothing is wet-lab validated.**
 
-![Primer-dimer potential vs plexity](docs/plexity_study/fig1_dimer_potential_vs_plexity.png)
+![Primer-dimer potential vs plexity](research/plexity_study/figures/fig1_dimer_potential_vs_plexity.png)
 
 Extendable-dimer pairs grow roughly as N² (155 at 100-plex, 15,750 at 935-plex). Screening holds the count at zero, but only by discarding targets:
 
-![Capacity vs plexity](docs/plexity_study/fig2_capacity_vs_plexity.png)
+![Capacity vs plexity](research/plexity_study/figures/fig2_capacity_vs_plexity.png)
 
 | | 100-plex | 935-plex |
 |---|---|---|
@@ -203,15 +203,15 @@ Extendable-dimer pairs grow roughly as N² (155 at 100-plex, 15,750 at 935-plex)
 
 The chemistry ladder adds one lever at a time (plain = no hot-start, 55 °C annealing, 250 nM per primer; then hot-start; 60 °C annealing; 50 nM primers; rebalanced primer concentrations). Hot-start does most of the work in the model:
 
-![Chemistry ladder at 935-plex](docs/plexity_study/fig4_rescue_ladder.png)
+![Chemistry ladder at 935-plex](research/plexity_study/figures/fig4_rescue_ladder.png)
 
 Uniformity falls with dimers, and stringent annealing plus low concentration costs some of it back until each primer's concentration is rebalanced (what the coverage-feedback loop does empirically):
 
-![Uniformity vs plexity](docs/plexity_study/fig3_uniformity_vs_plexity.png)
+![Uniformity vs plexity](research/plexity_study/figures/fig3_uniformity_vs_plexity.png)
 
 Competitive off-target sites (BLAST near-matches scored by primer-site duplex ΔG relative to the real target) fall about 3× with hot-start and 28× with the full ladder. Dimer screening does not select against off-target sites:
 
-![Off-target vs plexity](docs/plexity_study/fig5_offtarget_vs_plexity.png)
+![Off-target vs plexity](research/plexity_study/figures/fig5_offtarget_vs_plexity.png)
 
 **What this means for design.**
 * A brute-force search alone (no chemistry) places roughly 145 targets per pool under the plain limit. It stalls partly because tiled windows leave little primer choice (tile 11 had 10 distinct left and 3 distinct right primers sharing one motif, so one early pick blocked it). A joint search and more primer choice per tile would place more; more pools would too (about 7 for 1,000-plex by extrapolation, untested).
@@ -224,57 +224,52 @@ Competitive off-target sites (BLAST near-matches scored by primer-site duplex Δ
 4. The uniformity model is uncalibrated (efficiency from target occupancy and dimer sequestration, 30 cycles, no plateau); only relative comparisons mean anything.
 5. Off-target covers E. coli only (4.6 Mb); a human-scale genome has roughly 1,000× more candidate sites. The selection is greedy (+ one-swap repair), a pessimistic bound on what brute force can place.
 
-Reproduce (about 40 minutes on 4 cores; all numbers are in [`docs/plexity_study/plexity_study_table.csv`](docs/plexity_study/plexity_study_table.csv)):
+Reproduce (research code in [`research/plexity_study/`](research/plexity_study/README.md), not maintained or in CI; about 40 minutes on 4 cores; all numbers are in [`research/plexity_study/figures/plexity_study_table.csv`](research/plexity_study/figures/plexity_study_table.csv)):
 
 ```bash
-python scripts/plexity_study.py candidates --workdir study --n-targets 1000
-python scripts/plexity_study.py select --workdir study                 # greedy first-fit
-python scripts/plexity_study.py select --workdir study --repair        # + one-swap repair
-python scripts/plexity_study.py report --workdir study                 # dimers, uniformity
-python scripts/plexity_study.py offtarget --workdir study
-python scripts/plexity_plots.py --workdir study --outdir docs/plexity_study
+python research/plexity_study/plexity_study.py candidates --workdir study --n-targets 1000
+python research/plexity_study/plexity_study.py select --workdir study                 # greedy first-fit
+python research/plexity_study/plexity_study.py select --workdir study --repair        # + one-swap repair
+python research/plexity_study/plexity_study.py report --workdir study                 # dimers, uniformity
+python research/plexity_study/plexity_study.py offtarget --workdir study
+python research/plexity_study/plexity_plots.py --workdir study --outdir research/plexity_study/figures
 ```
 
 ---
 
-## 5. Analysis (`analysis/main.nf`)
-
-```mermaid
-flowchart TD
-    R["reads R1/R2"] --> FQ["FASTQC"]
-    R --> TR["TRIM_PRIMERS<br/>cutadapt, 5'-anchored primers"]
-    GN["genome"] --> BI["BUILD_INDICES"]
-    BED["amplicon BED"] --> PI["PREP_INTERVALS"]
-    BI --> PI
-    TR --> AL["ALIGN: bwa mem | samtools sort"]
-    BI --> AL
-    AL --> SI["SORT_INDEX_BAM"]
-    SI --> PM["PICARD_METRICS"]
-    PI --> PM
-    SI --> VC["GERMLINE_CALLING<br/>HaplotypeCaller, amplicon-tuned"]
-    PM --> RP["REPORT<br/>feedback JSON, summary TSV, uniformity PNG"]
-    FQ & TR & PM & RP --> MQ["MULTIQC"]
-```
-
-**Trimming.** Reads begin at the primer, so each primer is matched anchored at the 5′ end; R1 is searched with forward primers and R2 with reverse primers. Reads that match no primer are discarded.
-
-**Variant calling uses the sorted BAM, not a duplicate-marked one.** Amplicon reads share start positions, so >99 % of pairs look like duplicates and GATK's default filter would discard almost everything (mean depth 2 vs ~390× real).
-
-**HaplotypeCaller is tuned for amplicon data** (`--hc_args`): k-mers 10/15/25 (clustered SNVs defeat the default 10/25) plus `--recover-all-dangling-branches --min-dangling-branch-length 1` (SNVs 1–2 bases from a read end have no flanking anchor).
+## 5. Analysis (`analysis/analyze.py`)
 
 ```mermaid
 flowchart LR
-    D["GATK defaults<br/>27 / 42 SNVs"] --> K["+ k-mer 15<br/>30 / 42"] --> E["+ dangling-branch recovery<br/>32 / 42, 0 false positives"]
+    R["reads R1/R2"] --> TR["cutadapt<br/>5'-anchored primer trimming<br/>R1 forward, R2 reverse primers"]
+    TR --> AL["bwa mem | samtools sort + index"]
+    GN["genome"] --> AL
+    AL --> M["samtools bedcov / depth / stats<br/>per-amplicon coverage, on-target %, fold-80"]
+    BED["amplicon BED"] --> M
+    M --> RP["balance.py<br/>feedback JSON, summary TSV, uniformity PNG"]
 ```
 
-| Output (`--outdir`) | Content |
+```bash
+python analysis/analyze.py --reads "raw_data/S_R{1,2}.fastq.gz" --genome ref.fa \
+    --bed design/output/panel_pool_1.bed --primers design/output/panel_pool_1_trimming.fasta --outdir results
+```
+
+One run per pool (each has its own BED and primer FASTA). `{1,2}` marks the read number (a `*` before it matches several samples); a plain glob is treated as single-end. Only `cutadapt`, `bwa`, `samtools`, `numpy` and `matplotlib` are needed. A 21-amplicon, 6,300-pair panel takes about 6 seconds.
+
+**Trimming.** Reads begin at the primer, so each primer is matched anchored at the 5′ end; R1 is searched with forward primers and R2 with reverse primers. Reads that match no primer are discarded, and if *none* match the run stops with an error (usually the wrong pool's primer FASTA).
+
+**Metrics.** Per-amplicon mean coverage (`samtools bedcov`), per-base depth over the amplicons (`samtools depth`), and read/base counts (`samtools stats`) give mean target coverage, on-target base %, fold-80 (mean ÷ 20th percentile of target-base depth, reported as n/a when that percentile is 0, e.g. when short reads leave the trimmed primer sites uncovered) and % of amplicons above 0.2× the mean. On a 21-amplicon panel these reproduce the numbers the earlier Picard-based pipeline produced exactly (mean 397.407×, fold-80 1.329121, per-target means identical, same rebalancing actions).
+
+**No variant calling.** Run any caller on `<sample>.sorted.bam`. Amplicon reads share start positions, so more than 99% of pairs look like duplicates: do not run duplicate-aware tools or filters on them.
+
+| Output, in `<outdir>/<sample>/` | Content |
 |---|---|
-| `trimmed_reads/` | trimmed FASTQ + cutadapt log |
-| `bams/` | sorted, indexed BAM |
-| `qc/picard/`, `qc/fastqc/` | Picard PCR/alignment/insert metrics, FastQC |
-| `variants/germline/` | GVCF |
-| `report/` | `*_balancing_feedback.json`, `*_target_summary.tsv`, `*_uniformity.png` |
-| `multiqc/` | aggregated report |
+| `<sample>.sorted.bam` (+ `.bai`) | trimmed reads aligned to the reference |
+| `<sample>.trimmed_R1/R2.fastq.gz`, `cutadapt.log` | trimmed reads and the trimming report |
+| `target_coverage.tsv` | mean coverage per amplicon |
+| `<sample>_balancing_feedback.json` | input to `design.py --feedback` |
+| `<sample>_target_summary.tsv`, `<sample>_uniformity.png` | per-target recommendations; relative-coverage plot |
+| `<sample>_summary.json` | trimming, mapping and panel metrics in one file |
 
 ---
 
@@ -303,27 +298,18 @@ flowchart LR
 
 ## 8. Verified results
 
-Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml` (simulated reads, 300×).
+Run with real BLAST+, bwa, samtools and cutadapt from `environment.yml` (simulated reads, 300×).
 
 | Test | Result |
 |---|---|
 | 21-gene panel | 1 pool, every primer has exactly 1 perfect genomic hit, no predicted off-target products |
 | Synthetic spliced gene, real BLAST | junction-constrained target: no genomic product predicted; unconstrained: same-size genomic product flagged (table in section 3) |
-| Pipeline | 10 processes succeed in ~1.5 min; 6,299 / 6,300 pairs retained after trimming |
-| Panel coverage | mean 397×, fold-80 1.33, 100 % of targets above 0.2× |
-| Variants (47 injected SNVs) | 40 called, 0 false positives; all 7 misses lie under primers (trimmed by design), 0 in amplicon interiors |
+| Analysis (21-gene panel, 6,300 simulated pairs) | ~6 s; 6,299 / 6,300 pairs retained, 100% mapped, mean 397×, fold-80 1.33, 100% of targets above 0.2×; **identical to the earlier Picard/Nextflow run** (per-target relative coverage within 2e-9, same rebalancing actions) |
 | Tiled design, real BLAST (12 overlapping 300 bp windows) | **2 pools of 6, alternating (T01,T03,.. | T02,T04,..)**; all 12 placed, contiguous coverage, but 60 bp uncovered after primer trimming at three 20 bp overlaps (reported) |
 | Plexity study (935 tiled tiles, real primer3 + BLAST) | dimer potential ~N²; plain-limit brute force places 31% of 935 targets (290) in 2 pools; hot-start/60 °C/50 nM places ~100%; see section 4 for the model and its caveats |
-| Unit tests | 64 passing; CI runs them plus a real-BLAST design smoke test and a real pipeline run on a small fixture |
+| Unit tests | 69 passing (68 + 1 skipped when bwa/samtools are absent); CI runs lint + unit tests only; `scripts/check_all.sh` runs everything with the real tools in ~20 s (after the one-off environment install) |
 
-```mermaid
-pie showData
-    title "Injected SNVs: outcome"
-    "Called" : 40
-    "Missed, under a primer (not callable)" : 7
-```
-
-**Limitations.** Variant calling is validated only on simulated reads (identical copies per amplicon, 0.1 % error). Targets shorter than the minimum amplicon cannot be designed (lower `amplicon_min` for them). BLAST screening counts exact full-length hits only (3′-mismatch near-hits are not scored). Packing is randomised first-fit, not optimal. Within a pool, cross-products between different targets' primers are not yet checked (per-pair `predicted_products` covers each pair only).
+**Limitations.** Analysis is validated only on simulated reads (identical copies per amplicon, 0.1 % error). Targets shorter than the minimum amplicon cannot be designed (lower `amplicon_min` for them). BLAST screening counts exact full-length hits only (3′-mismatch near-hits are not scored). Packing is randomised first-fit, not optimal. Within a pool, products between different targets' primers are blocked below `--max-cross-product` (1000 bp sparse; the max amplicon size for tiled), a chosen default that is not validated.
 
 ---
 
@@ -343,11 +329,12 @@ Writes `specificity.html` (self-contained: genome overview, sortable target tabl
 flowchart TD
     R["repo"] --> D["design.py"]
     R --> C["core/biophysics.py"]
-    R --> A["analysis/<br/>main.nf, nextflow.config, balance.py, plot_uniformity.py,<br/>analysis_utils.py, generate_simulated_fastq.py"]
-    R --> S["scripts/<br/>design_viewer, plexity_study, plexity_plots,<br/>make_test_fixture, make_rna_example, genes_to_targets"]
+    R --> A["analysis/<br/>analyze.py, metrics.py, balance.py, plot_uniformity.py,<br/>generate_simulated_fastq.py"]
+    R --> S["scripts/<br/>design_viewer, check_all.sh,<br/>make_test_fixture, make_rna_example, genes_to_targets"]
+    R --> RS["research/plexity_study/<br/>unmaintained: scripts + figures"]
     R --> X["design/targets/, common_refs/ (E. coli K-12 genome + GFF)"]
-    R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
-    R --> G["AGENTS.md, CLAUDE.md, panel.example.toml,<br/>docs/plexity_study/ (figures + table)"]
+    R --> T["test_design.py, environment.yml,<br/>.github/workflows/ci.yml (fast) + real-tools.yml (manual)"]
+    R --> G["AGENTS.md, CLAUDE.md, panel.example.toml"]
 ```
 
-**Removed in this pruning** (all recoverable from git history): the tail-only mode and the second oligo format (tails themselves are back, see above), Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
+**Removed in this pruning** (all recoverable from git history): the tail-only mode and the second oligo format (tails themselves are back, see above), Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, **Nextflow, GATK variant calling, Picard, FastQC, MultiQC and the whole Java stack (replaced by `samtools` + Python, with Picard parity verified)**, the plexity-study scripts (moved to `research/`), the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.

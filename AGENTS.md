@@ -8,7 +8,7 @@ tool designs, screens and packs. Read `README.md` for detail; this file is the o
 1. **Never order, pay, or contact a vendor.** Produce `<prefix>_order.csv` and stop; a human approves and orders.
 2. **Show the design before it is ordered.** Run the viewer (below) and report pools, failed targets, flags and
    tiling gaps. Do not call a design "ready" if `results.failed` or `results.tiling_gaps` in the manifest is non-empty without saying so.
-3. **Everything here is in silico.** Nothing is wet-lab validated. Say "predicted", not "works". Variant-calling settings were tuned on simulated reads only.
+3. **Everything here is in silico.** Nothing is wet-lab validated. Say "predicted", not "works". The analysis was validated on simulated reads only.
 4. **Do not silently change thresholds, seeds or defaults.** If you change an option, say which and why. Same inputs + same `--seed` must reproduce identical output; keep it that way.
 5. **No push to `main`, no merge, no force-push, no deleting data** unless the human explicitly asks in this session.
 6. **Report failures plainly** (failed targets, unsatisfiable constraints, tests that fail). Never skip or weaken a test to get green.
@@ -22,10 +22,10 @@ tool designs, screens and packs. Read `README.md` for detail; this file is the o
         │  python scripts/design_viewer.py --prefix <prefix> --reference <fasta> --outdir <dir>
         ▼                                                  HUMAN REVIEW + APPROVAL, then the human orders
  wet lab (RT if RNA) → pooled PCR → Illumina sequencing → FASTQ
-        │  nextflow run analysis/main.nf --reads "x_R{1,2}.fastq.gz" --bed <prefix>_pool_N.bed \
+        │  python analysis/analyze.py --reads "x_R{1,2}.fastq.gz" --bed <prefix>_pool_N.bed \
         │      --primers <prefix>_pool_N_trimming.fasta --genome <reference.fa> --outdir results   (one run per pool)
         ▼
- results/report/<sample>_balancing_feedback.json, _target_summary.tsv, _uniformity.png, variants/, multiqc/
+ results/<sample>/: sorted BAM, target_coverage.tsv, <sample>_balancing_feedback.json, _target_summary.tsv, _uniformity.png, _summary.json
         │  python design.py --feedback <json> --targets targets.tsv --project panel.toml
         ▼
  <prefix>_rebalancing_recipe.csv (+ redesign of targets flagged REDESIGN)
@@ -53,28 +53,29 @@ Viewer near-matches (≥16 aligned bp, ≤1 mismatch, exact 3' end) are informat
 
 ## Verify before you say "done"
 ```bash
-python -m pytest test_design.py -q          # fast, no external tools (BLAST is mocked)
+python -m pytest test_design.py -q                   # fast; BLAST is mocked; the end-to-end analysis test skips without bwa/samtools
 python -m pyflakes design.py core analysis scripts
+bash scripts/check_all.sh                            # everything with the REAL tools (conda env), ~20 s; run before any merge
 ```
-Real tools (BLAST+, BWA, Picard, GATK, cutadapt, Nextflow) live in the conda env from `environment.yml`; CI runs a real-BLAST design smoke test
-and a real pipeline run on a small fixture (`scripts/make_test_fixture.py`, `scripts/make_rna_example.py`). Change design logic ⇒ add a test;
-change pipeline logic ⇒ run it for real, a stub run is not enough.
+Automatic CI (`.github/workflows/ci.yml`) is only lint + unit tests. `real-tools.yml` runs `check_all.sh` on demand. Change design logic ⇒ add a test;
+change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `research/` is not linted or tested.
 
 ## Map
+
 `design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) ·
-`analysis/main.nf` (+ `balance.py`, `plot_uniformity.py`, `analysis_utils.py`, `generate_simulated_fastq.py`) ·
-`scripts/` (`design_viewer.py`, `genes_to_targets.py`, `make_*_example/fixture.py`, `plexity_study.py` + `plexity_plots.py`) · `docs/plexity_study/` (figures + table) · `panel.example.toml` · `test_design.py`.
+`analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `generate_simulated_fastq.py`) ·
+`scripts/` (`design_viewer.py`, `check_all.sh`, `genes_to_targets.py`, `make_*_example/fixture.py`) · `research/plexity_study/` (unmaintained study + figures) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
 Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
-hairpin clamp deleted · no Docker · variants are called on the sorted (not duplicate-marked) BAM because amplicon reads share starts ·
-HaplotypeCaller uses amplicon-tuned assembly settings (`--hc_args`) · merge to `main` is the human's call.
+hairpin clamp deleted · no Docker · analysis is cutadapt + bwa + samtools + Python (Nextflow, GATK, Picard, FastQC, MultiQC removed; Picard parity verified) ·
+no variant calling (amplicon reads are >99% start-duplicates: no duplicate-aware tools) · plexity study lives in `research/` · merge to `main` is the human's call.
 
 ## Open items (say so if relevant, do not paper over)
 Tiling does not optimise neighbour overlap (it reports gaps) · strand specificity is decided at the RT step and cannot be verified from amplicon reads ·
 dimer screening uses gene-specific sequence, not the tailed oligo · packing is a heuristic with no optimality guarantee · near-match search is informational ·
 cross-product distance (1000 bp) is a chosen default, not a validated one.
-The in-silico plexity study (README section 4) rests on stated assumptions: hot-start is modelled as dimers extending at 55 °C instead of 37 °C, "risky" = occupancy ≥ 0.42% (calibrated to the tool's own limit, no sensitivity run), the plain baseline is 250 nM per primer at any plexity, and the uniformity model is uncalibrated. Quote it as a model, never as a result.
+The in-silico plexity study (README section 4, code in `research/`) rests on stated assumptions: hot-start is modelled as dimers extending at 55 °C instead of 37 °C, "risky" = occupancy ≥ 0.42% (calibrated to the tool's own limit, no sensitivity run), the plain baseline is 250 nM per primer at any plexity, and the uniformity model is uncalibrated. Quote it as a model, never as a result.
 
 ## Ask the human when
 the targets or reference are ambiguous · constraints are unsatisfiable · a design has failed targets or gaps · anything would leave the machine (ordering, publishing).

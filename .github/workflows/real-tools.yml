@@ -1,0 +1,22 @@
+# Manual only (Actions tab -> "real-tools" -> Run workflow): runs scripts/check_all.sh with the real tools.
+name: real-tools
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-all:
+    name: Full check with BLAST, bwa, samtools, cutadapt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v1
+        with:
+          environment-file: environment.yml
+          environment-name: amplicon_pipeline
+          cache-environment: true
+
+      - name: Run scripts/check_all.sh
+        shell: micromamba-shell {0}
+        run: bash scripts/check_all.sh

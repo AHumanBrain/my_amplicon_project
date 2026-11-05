@@ -5,6 +5,7 @@ import gzip
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 
@@ -484,12 +485,8 @@ class TestFeedback:
         assert seen["rows"][0]["name"] == "gyrB (v2)"
 
 
-# ---------------------------------------------------------------- analysis scripts
+# ---------------------------------------------------------------- analysis (samtools + Python)
 class TestAnalysis:
-    def test_to_float_handles_picard_placeholders(self):
-        from analysis_utils import to_float
-        assert to_float("?") == to_float("") == to_float(None) == 0.0 and to_float("1.5") == 1.5
-
     def test_recommend(self):
         from balance import recommend
         assert recommend(0)[1] == "FLAG FOR REDESIGN"
@@ -498,14 +495,89 @@ class TestAnalysis:
         assert recommend(4.0)[0] == pytest.approx(0.25) and recommend(4.0)[1].startswith("DECREASE")
         assert recommend(0.01)[0] == 10.0  # clamped
 
-    def test_feedback_survives_undefined_metrics(self):
+    def test_feedback_handles_undefined_fold80_and_flags_zero_coverage(self):
         from balance import build_feedback
-        t = [{'name': 'a', 'chrom': 'c', 'start': 1, 'end': 9, 'mean_coverage': 10.0},
-             {'name': 'b', 'chrom': 'c', 'start': 1, 'end': 9, 'mean_coverage': 0.0}]
-        fb = build_feedback({'MEAN_TARGET_COVERAGE': '10', 'PCT_AMPLIFIED_BASES': '1',
-                             'FOLD_80_BASE_PENALTY': '?'}, t)
-        assert fb['overall_metrics']['fold_80'] == 0.0
-        assert [r['action'] for r in fb['target_recommendations']][0] == "FLAG FOR REDESIGN"
+        t = [{"name": "a", "chrom": "c", "start": 1, "end": 9, "mean_coverage": 10.0},
+             {"name": "b", "chrom": "c", "start": 1, "end": 9, "mean_coverage": 0.0}]
+        fb = build_feedback({"mean_target_coverage": 10.0, "pct_on_target_bases": 99.0, "fold_80": None}, t)
+        assert fb["overall_metrics"]["fold_80"] is None and fb["overall_metrics"]["uniformity_0.2x"] == 50.0
+        assert fb["target_recommendations"][0]["action"] == "FLAG FOR REDESIGN"
+        json.dumps(fb)                                                       # serialisable (None -> null)
+
+    def test_parse_bedcov_and_stats(self):
+        import metrics
+        six = "chr\t100\t200\tT1_amplicon_S0_0\t0\t+\t5000\nchr\t300\t350\tT2\t0\t-\t0\n"
+        t = metrics.parse_bedcov(six)
+        assert [(x["name"], x["mean_coverage"]) for x in t] == [("T1_amplicon_S0_0", 50.0), ("T2", 0.0)]
+        assert metrics.parse_bedcov("chr\t0\t10\t40\n")[0]["name"] == "chr:0-10"      # 3-column BED gets a name
+        stats = ("SN\traw total sequences:\t200\t# x\nSN\treads mapped:\t190\t# x\n"
+                 "SN\tbases mapped (cigar):\t17000\t# x\nSN\treads paired:\t200\t# x\n")
+        assert metrics.parse_stats(stats) == {"reads_total": 200, "reads_mapped": 190, "bases_mapped": 17000}
+
+    def test_fold_80_matches_the_definition(self):
+        import numpy as np
+        import metrics
+        d = np.array([100] * 80 + [50] * 20)
+        assert metrics.fold_80(d) == pytest.approx(d.mean() / np.percentile(d, 20))
+        assert metrics.fold_80([5, 5, 5, 5]) == pytest.approx(1.0)
+        assert metrics.fold_80([0, 0, 0, 10]) is None and metrics.fold_80([]) is None   # undefined, Picard prints '?'
+
+    def test_panel_metrics(self):
+        import numpy as np
+        import metrics
+        m = metrics.panel_metrics([{}, {}], np.array([100.0] * 50 + [300.0] * 50),
+                                  {"reads_total": 100, "reads_mapped": 90, "bases_mapped": 25000})
+        assert m["mean_target_coverage"] == 200.0 and m["target_territory_bp"] == 100
+        assert m["pct_on_target_bases"] == pytest.approx(80.0) and m["pct_reads_mapped"] == 90.0
+
+    def test_find_samples(self, tmp_path):
+        import analyze
+        for n in ("A_R1.fastq.gz", "A_R2.fastq.gz", "B_R1.fastq.gz", "B_R2.fastq.gz"):
+            (tmp_path / n).write_text("")
+        got = analyze.find_samples(str(tmp_path / "*_R{1,2}.fastq.gz"))
+        assert [s for s, _ in got] == ["A", "B"] and all(len(f) == 2 for _, f in got)
+        assert got[0][1][1].endswith("A_R2.fastq.gz")
+        se = analyze.find_samples(str(tmp_path / "A_R1.fastq.gz"))
+        assert se == [("A_R1", [str(tmp_path / "A_R1.fastq.gz")])]
+        (tmp_path / "C_R1.fastq.gz").write_text("")
+        with pytest.raises(FileNotFoundError, match="mate"):
+            analyze.find_samples(str(tmp_path / "*_R{1,2}.fastq.gz"))
+        with pytest.raises(ValueError, match="wildcards"):
+            analyze.find_samples(str(tmp_path / "A_R{1,2}*.fastq.gz"))
+
+    def test_split_primers(self, tmp_path):
+        import analyze
+        fa = tmp_path / "p.fa"
+        fa.write_text(">a_F\nACGT\n>a_R\nTTTT\n>b_F\nGGGG\n>b_R\nCCCC\n")
+        f, r = analyze.split_primers(str(fa), str(tmp_path))
+        assert open(f).read() == ">a_F\nACGT\n>b_F\nGGGG\n" and open(r).read() == ">a_R\nTTTT\n>b_R\nCCCC\n"
+        fa.write_text(">x\nACGT\n")
+        with pytest.raises(ValueError, match="no forward primers"):
+            analyze.split_primers(str(fa), str(tmp_path))
+
+    @pytest.mark.skipif(not all(shutil.which(t) for t in ("cutadapt", "bwa", "samtools")),
+                        reason="needs cutadapt, bwa and samtools (the conda env)")
+    def test_end_to_end_on_the_small_fixture(self, tmp_path):
+        import analyze
+        import make_test_fixture as fx
+        fx.build(os.path.join(ROOT, "common_refs", "ecoli_genome.fna"), str(tmp_path / "fx"), coverage=40)
+        fx_dir = str(tmp_path / "fx")
+        args = (os.path.join(fx_dir, "FixtureSample_R{1,2}.fastq.gz"), os.path.join(fx_dir, "genome.fna"),
+                os.path.join(fx_dir, "targets.bed"), os.path.join(fx_dir, "primers_trimming.fasta"), str(tmp_path / "res"))
+        (s,) = analyze.analyze(*args, threads=2)
+        assert s["sample"] == "FixtureSample" and s["n_targets"] == 3
+        assert s["pct_retained"] == 100.0 and s["pct_reads_mapped"] > 99 and s["pct_on_target_bases"] > 95
+        assert s["mean_target_coverage"] > 20
+        for f in ("FixtureSample.sorted.bam", "FixtureSample_balancing_feedback.json", "FixtureSample_target_summary.tsv",
+                  "FixtureSample_uniformity.png", "target_coverage.tsv", "cutadapt.log", "FixtureSample_summary.json"):
+            assert os.path.exists(os.path.join(tmp_path, "res", "FixtureSample", f)), f
+        fb = json.load(open(tmp_path / "res/FixtureSample/FixtureSample_balancing_feedback.json"))
+        assert len(fb["target_recommendations"]) == 3
+        # a primer FASTA from another pool must fail loudly, not produce an empty report
+        bad = tmp_path / "other.fa"
+        bad.write_text(">x_F\nACGTACGTACGTACGTACGT\n>x_R\nTTTTGGGGAAAACCCCTTTT\n")
+        with pytest.raises(RuntimeError, match="no reads started with a primer"):
+            analyze.analyze(args[0], args[1], args[2], str(bad), str(tmp_path / "res2"), threads=2)
 
 
 class TestSimulatorAndFixture:

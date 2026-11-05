@@ -1,6 +1,6 @@
 """Draw the plexity-study figures from results.json (and offtarget_*.json when present).
 
-    python scripts/plexity_plots.py --workdir <study dir> --outdir <figure dir>
+    python research/plexity_study/plexity_plots.py --workdir <study dir> --outdir <figure dir>
 
 Colours follow the dataviz palette (validated): blue = naive primers, aqua = brute-force screened (repair),
 orange = brute-force first-fit; ordinal blue ramp = chemistry ladder steps (lighter = less chemistry).
