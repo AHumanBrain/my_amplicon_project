@@ -1,5 +1,7 @@
 # Multiplex Amplicon Toolkit
 
+[![CI](https://github.com/AHumanBrain/my_amplicon_project/actions/workflows/ci.yml/badge.svg)](https://github.com/AHumanBrain/my_amplicon_project/actions/workflows/ci.yml)
+
 Custom-panel multiplex PCR for DNA or RNA targets. You decide what to target; the tool designs the primers, screens them, packs them into pools, and analyses the sequencing so coverage feeds back into pool rebalancing.
 
 1. **Design** primers (primer3 + BLAST+ + dimer screening) for regions or sequences you specify
@@ -71,7 +73,7 @@ One TSV row per target: either a region (`reference`, `start`, `end`, 1-based in
 
 **RNA:** design on the transcript and screen against transcriptome *and* genome (`--specificity-fasta transcripts.fa genome.fa`). The report then shows genomic amplification: on a synthetic 3-exon gene, a junction-spanning primer pair has no genomic product, while the unconstrained pair predicts a same-size one (`python scripts/make_rna_example.py`).
 
-Ready-made E. coli sets live in `design/targets/`: `housekeeping.tsv` (21 classic genes), `ecoli_spread_{50,100,250,500}.tsv` (genome-wide, evenly spaced) and `ecoli_tiled_{12,100}.tsv` (overlapping tiles). `scripts/make_ecoli_targets.py` regenerates them.
+Ready-made E. coli sets live in `design/targets/`: `housekeeping.tsv` (21 classic genes), `ecoli_spread_{50,100,250}.tsv` (genome-wide, evenly spaced) and `ecoli_tiled_{12,100}.tsv` (overlapping tiles). `scripts/make_ecoli_targets.py` regenerates them.
 
 ## Design
 
@@ -169,7 +171,6 @@ Real BLAST+, bwa, samtools and cutadapt, simulated reads. Run everything with `b
 | 100 genes spread over the genome (`ecoli_spread_100`) | 100/100 designed, 3 pools [58, 37, 5], 128 s |
 | 250 genes spread over the genome (`ecoli_spread_250`) | 250/250 designed, 4 pools [89, 83, 53, 25], no failures, no unintended predicted products; about 11 min with 5 packing iterations. Simulated reads: every pool mean about 380×, fold-80 1.26–1.29 (see IGV above) |
 | Tiled design, 100 contiguous tiles (`ecoli_tiled_100`) | **Only 75/100 designed** (25 failed: no compatible pair in the tiled pool), 41 tiling gaps. A dense tiled panel is hard for this packer; read the failure list before ordering |
-| `ecoli_spread_500` | committed, **not run** |
 | Tiled design (12 overlapping tiles) | 2 pools of 6, alternating; reports 60 bp uncovered after primer trimming at three 20 bp overlaps |
 | RNA junction example | junction-spanning pair: no genomic product; unconstrained pair: same-size genomic product |
 | Analysis, 21-gene panel | 6 s; 6,299 of 6,300 pairs kept; mean 397×, fold-80 1.33; identical to the Picard run |

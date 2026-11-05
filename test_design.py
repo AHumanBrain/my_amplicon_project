@@ -724,7 +724,7 @@ class TestEcoliTargets:
         starts = [g[2] for g in picks]
         assert len({g[0] for g in picks}) == 100 and starts == sorted(starts)
         assert starts[-1] - starts[0] > 4_000_000 and min(b - a for a, b in zip(starts, starts[1:])) > 20_000
-        for n in (50, 100, 250, 500):                        # the committed files are exactly what the generator makes
+        for n in (50, 100, 250):                        # the committed files are exactly what the generator makes
             rows = [ln.rstrip("\n").split("\t") for ln in open(os.path.join(ROOT, "design", "targets", f"ecoli_spread_{n}.tsv"))][1:]
             assert [r[0] for r in rows] == [g[0] for g in mk.spread(genes, n)]
         with pytest.raises(ValueError, match="eligible"):
