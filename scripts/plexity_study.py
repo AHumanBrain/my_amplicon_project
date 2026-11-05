@@ -354,6 +354,108 @@ def stage_report(a):
     print("wrote results.json")
 
 
+# ---- off-target ---------------------------------------------------------------------------
+COMPETITIVE = 0.05      # an off-target site counts if it is >= 5 % as occupied as the primer's real target
+
+
+def _site_dg(primer, genome, site, temp):
+    """Duplex dG (kcal/mol) of `primer` on the genomic segment of a near-match site at `temp`."""
+    seg = genome[site['contig']][site['lo']:site['hi']]
+    like = seg if site['strand'] == '+' else str(design.Seq(seg).reverse_complement())
+    template = str(design.Seq(like).reverse_complement())
+    return primer3.calc_heterodimer(primer, template, temp_c=temp, **COND).dg / 1000.0
+
+
+def _count_products(sites, max_size):
+    """Facing (plus, minus) site pairs on one contig within max_size bp: sorted-sweep with bisect."""
+    import bisect
+    by = {}
+    for x in sites:
+        by.setdefault((x['contig'], x['strand']), []).append(x)
+    n = 0
+    for (contig, strand), plus in by.items():
+        if strand != '+':
+            continue
+        minus = sorted(by.get((contig, '-'), []), key=lambda x: x['hi'])
+        his = [m['hi'] for m in minus]
+        for a_ in plus:
+            lo_i = bisect.bisect_right(his, a_['lo'])               # minus sites ending after a_ starts
+            hi_i = bisect.bisect_right(his, a_['lo'] + max_size)
+            for m in minus[lo_i:hi_i]:
+                if a_['target'] == m['target'] and a_['own'] and m['own']:
+                    continue                                          # a target's own designed pair
+                n += 1
+    return n
+
+
+def stage_offtarget(a):
+    import json
+    import design_viewer as dv
+    cands = pickle.load(open(os.path.join(a.workdir, "candidates.pkl"), "rb"))['cands']
+    sels = {tag: pickle.load(open(os.path.join(a.workdir, fn), "rb"))
+            for tag, fn in (("firstfit", "selection.pkl"), ("repair", "selection_repair.pkl"))
+            if os.path.exists(os.path.join(a.workdir, fn))}
+    order = next(iter(sels.values()))['order']
+    scenarios = {'naive': {t: 0 for t in order}}
+    for tag, sel in sels.items():
+        for rule in ("plain", "rescue"):
+            scenarios[f"{tag}_{rule}"] = {t: r for t, r in sel[f"screened_{rule}"].items() if r is not None}
+    genome = {k: str(v.seq).upper() for k, v in design.load_references(a.reference).items()}
+    prefix = os.path.join(a.blast_dir, os.path.splitext(os.path.basename(a.reference[0]))[0])
+    plex = [n for n in a.plex if n <= len(order)] + ([len(order)] if len(order) not in a.plex else [])
+    for name, chosen in scenarios.items():
+        cache_file = os.path.join(a.workdir, f"offtarget_{name}.json")
+        if os.path.exists(cache_file) and not a.force:
+            print(f"{name}: cached")
+            continue
+        primers, info = {}, {}
+        for t, r in chosen.items():
+            c = cands[t][r]
+            foot = design.priming_footprints(c)          # [forward primer, reverse primer] as (lo, hi, strand)
+            primers[f"{t}_F"], primers[f"{t}_R"] = c['fwd'], c['rev']
+            info[f"{t}_F"], info[f"{t}_R"] = foot[0], foot[1]
+        sites = dv.near_matches(primers, prefix, a.min_len, a.max_mismatch)
+        off = []
+        for x in sites:
+            lo, hi = info[x['primer']][0], info[x['primer']][1]
+            if x['contig'] == a.contig and x['lo'] < hi and x['hi'] > lo:
+                continue                                                  # the primer's own site
+            off.append(x)
+        target_kd = {T: {nm: target_occupancy(seq, T, 1.0)[1] for nm, seq in primers.items()} for T in (37.0, 55.0, 60.0)}
+        for x in off:
+            x['target'] = x['primer'].rsplit('_', 1)[0]
+            x['dg'] = {T: _site_dg(primers[x['primer']], genome, x, T) for T in (37.0, 55.0, 60.0)}
+        print(f"{name}: {len(primers)} primers, {len(off)} near-match off-target sites", flush=True)
+        out = []
+        for n in plex:
+            cutoff = order[n - 1]
+            entry = {'N': n, 'levels': {}}
+            for lv in LADDER:
+                T, c = lv['dimer_T'], lv['conc']
+                comp = []
+                for x in off:
+                    if x['target'] > cutoff:
+                        continue
+                    kd_s = math.exp(x['dg'][T] / (R_KCAL * (T + 273.15)))
+                    occ_s = c / (c + kd_s)
+                    kd_t = target_kd[T][x['primer']]
+                    occ_t = c / (c + kd_t)
+                    if occ_s / occ_t >= COMPETITIVE:
+                        comp.append(dict(x, own=False))
+                own_sites = [dict(contig=a.contig, lo=info[f"{t}_{r}"][0], hi=info[f"{t}_{r}"][1], strand=info[f"{t}_{r}"][2],
+                                  target=t, own=True, pool=(int(t[1:]) - 1) % 2)
+                             for t in chosen if t <= cutoff for r in "FR"]
+                for x in comp:
+                    x['pool'] = (int(x['target'][1:]) - 1) % 2
+                products = sum(_count_products([s for s in own_sites + comp if s['pool'] == p], a.max_product) for p in (0, 1))
+                entry['levels'][lv['key']] = {
+                    'competitive_sites': len(comp), 'targets_with_site': len({x['target'] for x in comp}),
+                    'unintended_products': products}
+            out.append(entry)
+        json.dump(out, open(cache_file, "w"))
+    print("offtarget stage done")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -378,8 +480,19 @@ def main():
     r.add_argument("--workdir", required=True)
     r.add_argument("--plex", type=int, nargs="+", default=[10, 25, 50, 100, 200, 400, 700])
     r.add_argument("--force", action="store_true", help="ignore per-scenario caches")
+    o = sub.add_parser("offtarget")
+    o.add_argument("--workdir", required=True)
+    o.add_argument("--reference", nargs="+", default=[os.path.join(ROOT, "common_refs/ecoli_genome.fna")])
+    o.add_argument("--blast-dir", default="ncbi_data")
+    o.add_argument("--contig", default="NC_000913.3")
+    o.add_argument("--plex", type=int, nargs="+", default=[10, 25, 50, 100, 200, 400, 700])
+    o.add_argument("--min-len", type=int, default=14)
+    o.add_argument("--max-mismatch", type=int, default=2)
+    o.add_argument("--max-product", type=int, default=1000)
+    o.add_argument("--force", action="store_true")
     a = ap.parse_args()
-    {"candidates": stage_candidates, "select": stage_select, "report": stage_report}[a.stage](a)
+    {"candidates": stage_candidates, "select": stage_select, "report": stage_report,
+     "offtarget": stage_offtarget}[a.stage](a)
 
 
 if __name__ == "__main__":
