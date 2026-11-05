@@ -294,6 +294,11 @@ def stage_report(a):
     res = {'order_n': len(order), 'plex': plex, 'ladder': LADDER, 'F_CRIT': F_CRIT, 'E_MAX': E_MAX,
            'CYCLES': CYCLES, 'scenarios': {}}
     for name, chosen in scenarios.items():
+        cache_file = os.path.join(a.workdir, f"scenario_{name}.json")
+        if os.path.exists(cache_file) and not a.force:
+            res['scenarios'][name] = json.load(open(cache_file))
+            print(f"{name}: loaded from cache", flush=True)
+            continue
         t0 = time.time()
         rows = {0: [], 1: []}                       # per pool: [(rank_in_order, tid, F, R)]
         for k, t in enumerate(order):
@@ -341,6 +346,8 @@ def stage_report(a):
                     'frac_seq_ge_5pct': float((s_cat >= 0.05).mean()), 'uniform_frac_ge_0p2': frac, 'log2_sd': sd}
             out.append(entry)
         res['scenarios'][name] = out
+        with open(cache_file, "w") as f:
+            json.dump(out, f)
         print(f"{name}: done in {time.time() - t0:.0f}s", flush=True)
     with open(os.path.join(a.workdir, "results.json"), "w") as f:
         json.dump(res, f, indent=1)
@@ -370,6 +377,7 @@ def main():
     r = sub.add_parser("report")
     r.add_argument("--workdir", required=True)
     r.add_argument("--plex", type=int, nargs="+", default=[10, 25, 50, 100, 200, 400, 700])
+    r.add_argument("--force", action="store_true", help="ignore per-scenario caches")
     a = ap.parse_args()
     {"candidates": stage_candidates, "select": stage_select, "report": stage_report}[a.stage](a)
 
