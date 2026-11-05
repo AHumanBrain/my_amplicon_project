@@ -63,7 +63,7 @@ change pipeline logic ⇒ run it for real, a stub run is not enough.
 ## Map
 `design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) ·
 `analysis/main.nf` (+ `balance.py`, `plot_uniformity.py`, `analysis_utils.py`, `generate_simulated_fastq.py`) ·
-`scripts/` (`design_viewer.py`, `genes_to_targets.py`, `make_*_example/fixture.py`) · `panel.example.toml` · `test_design.py`.
+`scripts/` (`design_viewer.py`, `genes_to_targets.py`, `make_*_example/fixture.py`, `plexity_study.py` + `plexity_plots.py`) · `docs/plexity_study/` (figures + table) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
 Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
@@ -74,6 +74,7 @@ HaplotypeCaller uses amplicon-tuned assembly settings (`--hc_args`) · merge to 
 Tiling does not optimise neighbour overlap (it reports gaps) · strand specificity is decided at the RT step and cannot be verified from amplicon reads ·
 dimer screening uses gene-specific sequence, not the tailed oligo · packing is a heuristic with no optimality guarantee · near-match search is informational ·
 cross-product distance (1000 bp) is a chosen default, not a validated one.
+The in-silico plexity study (README section 4) rests on stated assumptions: hot-start is modelled as dimers extending at 55 °C instead of 37 °C, "risky" = occupancy ≥ 0.42% (calibrated to the tool's own limit, no sensitivity run), the plain baseline is 250 nM per primer at any plexity, and the uniformity model is uncalibrated. Quote it as a model, never as a result.
 
 ## Ask the human when
 the targets or reference are ambiguous · constraints are unsatisfiable · a design has failed targets or gaps · anything would leave the machine (ordering, publishing).

@@ -182,6 +182,59 @@ flowchart TD
 | `--rescue` | off | shift the window of unconstrained region targets if no pair passes |
 
 
+### Plexity limits: an in-silico study
+
+How far does a tiled design go as plexity grows, and what does chemistry buy back? The study designs **935 overlapping E. coli tiles** (of 1,000; 65 had no specific primer pair for a 230-300 bp amplicon) in two alternating pools with real primer3 and BLAST, then measures dimer potential, capacity, off-target priming and (modelled) uniformity from 10 to 935 targets. **Everything here is in silico; nothing is wet-lab validated.**
+
+![Primer-dimer potential vs plexity](docs/plexity_study/fig1_dimer_potential_vs_plexity.png)
+
+Extendable-dimer pairs grow roughly as N² (155 at 100-plex, 15,750 at 935-plex). Screening holds the count at zero, but only by discarding targets:
+
+![Capacity vs plexity](docs/plexity_study/fig2_capacity_vs_plexity.png)
+
+| | 100-plex | 935-plex |
+|---|---|---|
+| Targets placeable under the plain dimer limit (first-fit / + repair) | 75% / 77% | 26% / 31% |
+| Targets placeable under the hot-start, 60 °C, 50 nM limit | 100% | 99.9-100% |
+| Risky dimer pairs: plain / + hot-start / full ladder | 155 / 2 / 0 | 15,750 / 205 / 3 |
+| Mean primer 3′ end tied up in dimers: plain / + hot-start / full ladder | 10.1% / 0.07% / 0.004% | 62% / 0.85% / 0.04% |
+| Competitive off-target sites: plain / + hot-start / full ladder | 367 / 100 / 9 | 3,495 / 1,096 / 126 |
+| Amplicons ≥ 0.2× mean (model): plain / + hot-start / full ladder / + rebalanced | 68 / 100 / 92 / 100% | 8 / 99 / 91 / 100% |
+
+The chemistry ladder adds one lever at a time (plain = no hot-start, 55 °C annealing, 250 nM per primer; then hot-start; 60 °C annealing; 50 nM primers; rebalanced primer concentrations). Hot-start does most of the work in the model:
+
+![Chemistry ladder at 935-plex](docs/plexity_study/fig4_rescue_ladder.png)
+
+Uniformity falls with dimers, and stringent annealing plus low concentration costs some of it back until each primer's concentration is rebalanced (what the coverage-feedback loop does empirically):
+
+![Uniformity vs plexity](docs/plexity_study/fig3_uniformity_vs_plexity.png)
+
+Competitive off-target sites (BLAST near-matches scored by primer-site duplex ΔG relative to the real target) fall about 3× with hot-start and 28× with the full ladder. Dimer screening does not select against off-target sites:
+
+![Off-target vs plexity](docs/plexity_study/fig5_offtarget_vs_plexity.png)
+
+**What this means for design.**
+* A brute-force search alone (no chemistry) places roughly 145 targets per pool under the plain limit. It stalls partly because tiled windows leave little primer choice (tile 11 had 10 distinct left and 3 distinct right primers sharing one motif, so one early pick blocked it). A joint search and more primer choice per tile would place more; more pools would too (about 7 for 1,000-plex by extrapolation, untested).
+* The levers that rescue it are commodity ones: hot-start polymerase, higher annealing temperature, lower per-primer concentration, and concentration rebalancing. I cannot vouch for the IP status of any of them; proprietary named chemistries were deliberately left out.
+
+**Do not over-read it.**
+1. The *plain* baseline holds 250 nM per primer at every plexity (about 0.23 mM total at 935-plex), a worst case. Most commercial master mixes are already hot-start, so the realistic "no special primer chemistry" baseline is the hot-start step.
+2. Hot-start is modelled as dimers extending at 55 °C instead of 37 °C. That single assumption drives the biggest effect, and real high-plex PCR still makes dimers with hot-start, so remaining risk is probably underestimated.
+3. "Risky" means pair occupancy ≥ 0.42%, calibrated to the tool's own −6 kcal/mol at 37 °C. Dimer products amplify exponentially, so the true tolerance may be much stricter. No sensitivity analysis has been run; the scaling is probably robust, the absolute counts are not predictions.
+4. The uniformity model is uncalibrated (efficiency from target occupancy and dimer sequestration, 30 cycles, no plateau); only relative comparisons mean anything.
+5. Off-target covers E. coli only (4.6 Mb); a human-scale genome has roughly 1,000× more candidate sites. The selection is greedy (+ one-swap repair), a pessimistic bound on what brute force can place.
+
+Reproduce (about 40 minutes on 4 cores; all numbers are in [`docs/plexity_study/plexity_study_table.csv`](docs/plexity_study/plexity_study_table.csv)):
+
+```bash
+python scripts/plexity_study.py candidates --workdir study --n-targets 1000
+python scripts/plexity_study.py select --workdir study                 # greedy first-fit
+python scripts/plexity_study.py select --workdir study --repair        # + one-swap repair
+python scripts/plexity_study.py report --workdir study                 # dimers, uniformity
+python scripts/plexity_study.py offtarget --workdir study
+python scripts/plexity_plots.py --workdir study --outdir docs/plexity_study
+```
+
 ---
 
 ## 5. Analysis (`analysis/main.nf`)
@@ -244,7 +297,7 @@ flowchart LR
 
 * Order `<prefix>_order.csv` oligos as standard primers (desalted is fine for PCR; plate format is convenient). Pool by the `pool` column.
 * One pool = one PCR tube. Overlapping amplicons are already in different pools.
-* If dimers or imbalance persist in the lab: lower per-primer concentration, use a hot-start polymerase, lengthen the annealing/extension step, then run the rebalancing loop above.
+* If dimers or imbalance persist in the lab: lower per-primer concentration (more so as plexity grows), use a hot-start polymerase, raise or touch-down the annealing temperature, lengthen the extension step, then run the rebalancing loop above. The [in-silico study](#plexity-limits-an-in-silico-study) ranks these levers in a model (hot-start first); it is not a lab result.
 
 ---
 
@@ -260,6 +313,7 @@ Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml` (sim
 | Panel coverage | mean 397×, fold-80 1.33, 100 % of targets above 0.2× |
 | Variants (47 injected SNVs) | 40 called, 0 false positives; all 7 misses lie under primers (trimmed by design), 0 in amplicon interiors |
 | Tiled design, real BLAST (12 overlapping 300 bp windows) | **2 pools of 6, alternating (T01,T03,.. | T02,T04,..)**; all 12 placed, contiguous coverage, but 60 bp uncovered after primer trimming at three 20 bp overlaps (reported) |
+| Plexity study (935 tiled tiles, real primer3 + BLAST) | dimer potential ~N²; plain-limit brute force places 31% of 935 targets (290) in 2 pools; hot-start/60 °C/50 nM places ~100%; see section 4 for the model and its caveats |
 | Unit tests | 64 passing; CI runs them plus a real-BLAST design smoke test and a real pipeline run on a small fixture |
 
 ```mermaid
@@ -290,10 +344,10 @@ flowchart TD
     R["repo"] --> D["design.py"]
     R --> C["core/biophysics.py"]
     R --> A["analysis/<br/>main.nf, nextflow.config, balance.py, plot_uniformity.py,<br/>analysis_utils.py, generate_simulated_fastq.py"]
-    R --> S["scripts/<br/>make_test_fixture.py, make_rna_example.py, genes_to_targets.py"]
+    R --> S["scripts/<br/>design_viewer, plexity_study, plexity_plots,<br/>make_test_fixture, make_rna_example, genes_to_targets"]
     R --> X["design/targets/, common_refs/ (E. coli K-12 genome + GFF)"]
     R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
-    R --> G["AGENTS.md, CLAUDE.md, panel.example.toml"]
+    R --> G["AGENTS.md, CLAUDE.md, panel.example.toml,<br/>docs/plexity_study/ (figures + table)"]
 ```
 
 **Removed in this pruning** (all recoverable from git history): the tail-only mode and the second oligo format (tails themselves are back, see above), Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
