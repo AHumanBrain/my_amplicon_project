@@ -62,8 +62,11 @@ jobs:
             --specificity-fasta "$EX/cdna.fa" "$EX/genome.fa" \
             --blast-dir "$EX/db" --output-prefix "$EX/out" --num-candidates 20
           python - <<PY
-          import csv, os
-          rows = {r["target_id"]: r for r in csv.DictReader(open(os.environ["RUNNER_TEMP"] + "/rna/out_pool_1.csv"))}
+          import csv, glob, os
+          # the two targets share one window, so the tiled layout puts them in different pools: read every pool
+          rows = {r["target_id"]: r for f in glob.glob(os.environ["RUNNER_TEMP"] + "/rna/out_pool_*.csv")
+                  for r in csv.DictReader(open(f))}
+          assert set(rows) == {"TX1_plain", "TX1_junction"}, sorted(rows)
           plain, junc = rows["TX1_plain"], rows["TX1_junction"]
           assert "genome:" in plain["predicted_products"], "unconstrained design should show a genomic product"
           assert "genome:" not in junc["predicted_products"], "junction-spanning design must not amplify genomic DNA"
