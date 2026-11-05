@@ -172,7 +172,8 @@ def _greedy_pool(args):
 def greedy_select(cands, order, temp, conc, max_cross):
     """Run _greedy_pool for the two alternating tiled pools in parallel. Returns {target: rank or None}."""
     thr = dg_threshold(temp, conc, F_CRIT)
-    pools = [[(t, cands[t]) for i, t in enumerate(order) if i % 2 == p] for p in (0, 1)]
+    # pool = parity of the TILE number (not the list position), so a failed tile cannot shift the alternation
+    pools = [[(t, cands[t]) for t in order if (int(t[1:]) - 1) % 2 == p] for p in (0, 1)]
     with multiprocessing.Pool(2) as pool:
         parts = pool.map(_greedy_pool, [(items, temp, thr, max_cross) for items in pools])
     return {**parts[0], **parts[1]}
@@ -194,6 +195,127 @@ def stage_select(a):
         pickle.dump(out, f)
 
 
+# ---- metrics ------------------------------------------------------------------------------
+# Chemistry ladder. dimer_T = temperature at which extendable dimers matter (37 C when there is no
+# hot-start, because dimers can extend during setup); anneal_T = cycling annealing temperature.
+LADDER = [
+    dict(key="L0", label="plain (no hot-start, 55 C anneal, 250 nM)", dimer_T=37.0, anneal_T=55.0, conc=250e-9),
+    dict(key="L1", label="+ hot-start", dimer_T=55.0, anneal_T=55.0, conc=250e-9),
+    dict(key="L2", label="+ stringent annealing (60 C)", dimer_T=60.0, anneal_T=60.0, conc=250e-9),
+    dict(key="L3", label="+ lower primer conc (50 nM)", dimer_T=60.0, anneal_T=60.0, conc=50e-9),
+    dict(key="L4", label="+ rebalanced primer conc", dimer_T=60.0, anneal_T=60.0, conc=50e-9, rebalance=True),
+]
+E_MAX, CYCLES = 0.95, 30        # assumed ceiling efficiency per cycle and cycle number (uniformity model)
+CONC_BOUNDS = (10e-9, 250e-9)   # rebalancing may move each primer within this range
+
+
+def sym_dg(upper):
+    """Upper-triangular dG matrix -> symmetric matrix (0 = no interaction)."""
+    return upper + upper.T - np.diag(np.diag(upper))
+
+
+def sequestration(dg_sym, temp, conc_vec):
+    """s_i = 1 - prod_j (1 - c_j/(c_j + Kd_ij)): fraction of primer i's 3' end tied up by any partner."""
+    n = len(conc_vec)
+    kd = np.full((n, n), np.inf)
+    mask = dg_sym < 0
+    kd[mask] = np.exp(dg_sym[mask] / (R_KCAL * (temp + 273.15)))
+    partner = np.broadcast_to(conc_vec[None, :], (n, n))
+    f = np.where(mask, partner / (partner + kd), 0.0)
+    return 1.0 - np.exp(np.log1p(-f).sum(axis=1))
+
+
+def risky_pairs(dg_upper, temp, conc):
+    """Count of primer pairs (incl. self-dimers) whose occupancy at (temp, conc) is >= F_CRIT."""
+    mask = dg_upper < 0
+    occ = np.zeros_like(dg_upper, dtype=float)
+    occ[mask] = conc / (conc + np.exp(dg_upper[mask] / (R_KCAL * (temp + 273.15))))
+    return int((occ >= F_CRIT).sum())
+
+
+def target_occupancy(seq, temp, conc_vec_scalar):
+    """Occupancy of a primer on its perfect target at (temp, conc), from the primer-template duplex dG."""
+    rc = str(design.Seq(seq).reverse_complement())
+    dg = primer3.calc_heterodimer(seq, rc, temp_c=temp, **COND).dg / 1000.0
+    kd = kd_molar(dg, temp)
+    return conc_vec_scalar / (conc_vec_scalar + kd), kd
+
+
+def uniformity(occ_f, occ_r, s_f, s_r):
+    e = E_MAX * occ_f * occ_r * (1 - s_f) * (1 - s_r)
+    y = (1 + e) ** CYCLES
+    m = y.mean()
+    return float((y >= 0.2 * m).mean()), float(np.std(np.log2(y)))
+
+
+def stage_report(a):
+    import json
+    import time
+    cands = pickle.load(open(os.path.join(a.workdir, "candidates.pkl"), "rb"))['cands']
+    sel = pickle.load(open(os.path.join(a.workdir, "selection.pkl"), "rb"))
+    order = sel['order']
+    scenarios = {
+        'naive': {t: 0 for t in order},                                          # best primer3 pair, no screening
+        'screened_plain': {t: r for t, r in sel['screened_plain'].items() if r is not None},
+        'screened_rescue': {t: r for t, r in sel['screened_rescue'].items() if r is not None},
+    }
+    plex = [n for n in a.plex if n <= len(order)] + ([len(order)] if len(order) not in a.plex else [])
+    res = {'order_n': len(order), 'plex': plex, 'ladder': LADDER, 'F_CRIT': F_CRIT, 'E_MAX': E_MAX,
+           'CYCLES': CYCLES, 'scenarios': {}}
+    for name, chosen in scenarios.items():
+        t0 = time.time()
+        rows = {0: [], 1: []}                       # per pool: [(rank_in_order, tid, F, R)]
+        for k, t in enumerate(order):
+            if t in chosen:
+                c = cands[t][chosen[t]]
+                rows[(int(t[1:]) - 1) % 2].append((k, t, c['fwd'], c['rev']))
+        pools = {}
+        for p, lst in rows.items():
+            seqs = [x for _, _, f, r in lst for x in (f, r)]
+            m37 = pair_matrix(seqs, 37.0)
+            pools[p] = dict(lst=lst, seqs=seqs, m={37: m37, 55: refine_matrix(seqs, m37, 55.0),
+                                                   60: refine_matrix(seqs, m37, 60.0)})
+        print(f"{name}: matrices done in {time.time() - t0:.0f}s ({sum(len(v['lst']) for v in pools.values())} targets)", flush=True)
+        # target occupancy / Kd per primer at each annealing temperature
+        kd_t = {T: {p: np.array([target_occupancy(x, T, 1.0)[1] for x in v['seqs']]) for p, v in pools.items()}
+                for T in (55.0, 60.0)}
+        out = []
+        for n in plex:
+            cutoff = order[n - 1]
+            entry = {'N': n, 'placed': sum(1 for t in chosen if t <= cutoff), 'levels': {}}
+            for lv in LADDER:
+                seq_all, occ_f, occ_r, risky = [], [], [], 0
+                sf, sr = [], []
+                for p, v in pools.items():
+                    keep = [i for i, (k, t, _, _) in enumerate(v['lst']) if t <= cutoff]
+                    idx = np.array([j for i in keep for j in (2 * i, 2 * i + 1)], dtype=int)
+                    if len(idx) == 0:
+                        continue
+                    up = v['m'][int(lv['dimer_T'])][np.ix_(idx, idx)]
+                    risky += risky_pairs(up, lv['dimer_T'], lv['conc'])
+                    kd = kd_t[lv['anneal_T']][p][idx]
+                    if lv.get('rebalance'):
+                        occ_star = 0.75
+                        conc = np.clip(kd * occ_star / (1 - occ_star), *CONC_BOUNDS)
+                    else:
+                        conc = np.full(len(idx), lv['conc'])
+                    occ = conc / (conc + kd)
+                    s_vec = sequestration(sym_dg(up), lv['dimer_T'], conc)
+                    seq_all.append(s_vec)
+                    occ_f.append(occ[0::2]); occ_r.append(occ[1::2]); sf.append(s_vec[0::2]); sr.append(s_vec[1::2])
+                s_cat = np.concatenate(seq_all)
+                frac, sd = uniformity(np.concatenate(occ_f), np.concatenate(occ_r), np.concatenate(sf), np.concatenate(sr))
+                entry['levels'][lv['key']] = {
+                    'risky_pairs': risky, 'mean_seq': float(s_cat.mean()), 'p95_seq': float(np.percentile(s_cat, 95)),
+                    'frac_seq_ge_5pct': float((s_cat >= 0.05).mean()), 'uniform_frac_ge_0p2': frac, 'log2_sd': sd}
+            out.append(entry)
+        res['scenarios'][name] = out
+        print(f"{name}: done in {time.time() - t0:.0f}s", flush=True)
+    with open(os.path.join(a.workdir, "results.json"), "w") as f:
+        json.dump(res, f, indent=1)
+    print("wrote results.json")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="stage", required=True)
@@ -213,8 +335,11 @@ def main():
     sl.add_argument("--amp-max", type=int, default=300)
     sl.add_argument("--rescue-temp", type=float, default=60.0)
     sl.add_argument("--rescue-conc", type=float, default=50e-9)
+    r = sub.add_parser("report")
+    r.add_argument("--workdir", required=True)
+    r.add_argument("--plex", type=int, nargs="+", default=[10, 25, 50, 100, 200, 400, 700])
     a = ap.parse_args()
-    {"candidates": stage_candidates, "select": stage_select}[a.stage](a)
+    {"candidates": stage_candidates, "select": stage_select, "report": stage_report}[a.stage](a)
 
 
 if __name__ == "__main__":
