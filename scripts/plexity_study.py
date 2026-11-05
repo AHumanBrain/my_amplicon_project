@@ -131,12 +131,16 @@ def refine_matrix(primers, base, temp):
 def _greedy_pool(args):
     """Greedy (genome-order) choice of one primer pair per target inside ONE fixed pool.
 
-    A candidate is accepted if (a) none of its primers has a pair with a member's primer whose
-    3'-end dG at `temp` is below `thr`, (b) its own F/R pair and self-dimers also pass, (c) its
-    amplicon does not overlap a member's, and (d) no cross-target product shorter than `max_cross`.
+    A candidate is accepted if (a) its own primers (self-dimers and F/R) pass, (b) none of its primers
+    has a pair with a member's primer whose 3'-end dG at `temp` is below `thr`, (c) its amplicon does
+    not overlap a member's, and (d) there is no cross-target product shorter than `max_cross`.
+    With repair=True, a target left unplaced is retried: if exactly ONE member blocks a candidate,
+    that member is moved to one of its own alternatives (conflict-directed one-swap repair), up to
+    `passes` times over the unplaced targets.
     """
-    items, temp, thr, max_cross = args          # items: [(target, [candidate dicts])] in genome order
-    cache, members, chosen = {}, [], {}
+    items, temp, thr, max_cross, repair, passes = args    # items: [(target, [candidate dicts])] genome order
+    cache, chosen_c, chosen = {}, {}, {}
+    cand_of = dict(items)
 
     def dg(a, b):
         key = (a, b) if a <= b else (b, a)
@@ -144,54 +148,80 @@ def _greedy_pool(args):
             cache[key] = pair_dg(key[0], key[1], temp)
         return cache[key]
 
+    def internal_ok(c):
+        f, r = c['fwd'], c['rev']
+        return dg(f, f) >= thr and dg(r, r) >= thr and dg(f, r) >= thr
+
+    def blocks(c, m):
+        """True if member candidate m prevents candidate c."""
+        if c['start'] < m['end'] and c['end'] > m['start']:
+            return True
+        size = design.cross_product_size(c, m)
+        if size is not None and size <= max_cross:
+            return True
+        return any(dg(x, y) < thr for x in (c['fwd'], c['rev']) for y in (m['fwd'], m['rev']))
+
+    def blockers(c, skip=None):
+        return [t for t, m in chosen_c.items() if t != skip and blocks(c, m)]
+
     for tid, cands in items:
         chosen[tid] = None
         for rank, c in enumerate(cands):
-            f, r = c['fwd'], c['rev']
-            if dg(f, f) < thr or dg(r, r) < thr or dg(f, r) < thr:
-                continue
-            ok = True
-            for m in members:
-                if c['start'] < m['end'] and c['end'] > m['start']:
-                    ok = False
-                    break
-                size = design.cross_product_size(c, m)
-                if size is not None and size <= max_cross:
-                    ok = False
-                    break
-                if any(dg(x, y) < thr for x in (f, r) for y in (m['fwd'], m['rev'])):
-                    ok = False
-                    break
-            if ok:
-                members.append(c)
-                chosen[tid] = rank
+            if internal_ok(c) and not blockers(c):
+                chosen_c[tid], chosen[tid] = c, rank
+                break
+
+    if repair:
+        for _ in range(passes):
+            progress = False
+            for tid, cands in items:
+                if chosen[tid] is not None:
+                    continue
+                for rank, c in enumerate(cands):
+                    if not internal_ok(c):
+                        continue
+                    bl = blockers(c)
+                    if len(bl) != 1:
+                        continue
+                    mt = bl[0]
+                    for alt_rank, alt in enumerate(cand_of[mt]):
+                        if alt is chosen_c[mt] or not internal_ok(alt) or blocks(alt, c) or blockers(alt, skip=mt):
+                            continue
+                        chosen_c[mt], chosen[mt] = alt, alt_rank
+                        chosen_c[tid], chosen[tid] = c, rank
+                        progress = True
+                        break
+                    if chosen[tid] is not None:
+                        break
+            if not progress:
                 break
     return chosen
 
 
-def greedy_select(cands, order, temp, conc, max_cross):
+def greedy_select(cands, order, temp, conc, max_cross, repair=False, passes=3):
     """Run _greedy_pool for the two alternating tiled pools in parallel. Returns {target: rank or None}."""
     thr = dg_threshold(temp, conc, F_CRIT)
     # pool = parity of the TILE number (not the list position), so a failed tile cannot shift the alternation
     pools = [[(t, cands[t]) for t in order if (int(t[1:]) - 1) % 2 == p] for p in (0, 1)]
     with multiprocessing.Pool(2) as pool:
-        parts = pool.map(_greedy_pool, [(items, temp, thr, max_cross) for items in pools])
+        parts = pool.map(_greedy_pool, [(items, temp, thr, max_cross, repair, passes) for items in pools])
     return {**parts[0], **parts[1]}
 
 
 def stage_select(a):
+    out_name = "selection_repair.pkl" if a.repair else "selection.pkl"
     with open(os.path.join(a.workdir, "candidates.pkl"), "rb") as f:
         cands = pickle.load(f)['cands']
     order = sorted(cands)
     max_cross = a.amp_max
     out = {'order': order}
     for name, temp, conc in (("screened_plain", T_SETUP, BASE_CONC), ("screened_rescue", a.rescue_temp, a.rescue_conc)):
-        sel = greedy_select(cands, order, temp, conc, max_cross)
+        sel = greedy_select(cands, order, temp, conc, max_cross, repair=a.repair)
         placed = sum(r is not None for r in sel.values())
-        print(f"{name}: threshold {dg_threshold(temp, conc, F_CRIT):.2f} kcal/mol at {temp} C, {conc * 1e9:.0f} nM -> "
+        print(f"{'repair' if a.repair else 'firstfit'} {name}: threshold {dg_threshold(temp, conc, F_CRIT):.2f} kcal/mol at {temp} C, {conc * 1e9:.0f} nM -> "
               f"{placed}/{len(order)} targets placed (first 8 unplaced: {[t for t in order if sel[t] is None][:8]})")
         out[name] = sel
-    with open(os.path.join(a.workdir, "selection.pkl"), "wb") as f:
+    with open(os.path.join(a.workdir, out_name), "wb") as f:
         pickle.dump(out, f)
 
 
@@ -252,13 +282,14 @@ def stage_report(a):
     import json
     import time
     cands = pickle.load(open(os.path.join(a.workdir, "candidates.pkl"), "rb"))['cands']
-    sel = pickle.load(open(os.path.join(a.workdir, "selection.pkl"), "rb"))
-    order = sel['order']
-    scenarios = {
-        'naive': {t: 0 for t in order},                                          # best primer3 pair, no screening
-        'screened_plain': {t: r for t, r in sel['screened_plain'].items() if r is not None},
-        'screened_rescue': {t: r for t, r in sel['screened_rescue'].items() if r is not None},
-    }
+    sels = {tag: pickle.load(open(os.path.join(a.workdir, fn), "rb"))
+            for tag, fn in (("firstfit", "selection.pkl"), ("repair", "selection_repair.pkl"))
+            if os.path.exists(os.path.join(a.workdir, fn))}
+    order = next(iter(sels.values()))['order']
+    scenarios = {'naive': {t: 0 for t in order}}                      # best primer3 pair, no screening
+    for tag, sel in sels.items():
+        for rule in ("plain", "rescue"):
+            scenarios[f"{tag}_{rule}"] = {t: r for t, r in sel[f"screened_{rule}"].items() if r is not None}
     plex = [n for n in a.plex if n <= len(order)] + ([len(order)] if len(order) not in a.plex else [])
     res = {'order_n': len(order), 'plex': plex, 'ladder': LADDER, 'F_CRIT': F_CRIT, 'E_MAX': E_MAX,
            'CYCLES': CYCLES, 'scenarios': {}}
@@ -335,6 +366,7 @@ def main():
     sl.add_argument("--amp-max", type=int, default=300)
     sl.add_argument("--rescue-temp", type=float, default=60.0)
     sl.add_argument("--rescue-conc", type=float, default=50e-9)
+    sl.add_argument("--repair", action="store_true", help="conflict-directed one-swap repair after the greedy pass")
     r = sub.add_parser("report")
     r.add_argument("--workdir", required=True)
     r.add_argument("--plex", type=int, nargs="+", default=[10, 25, 50, 100, 200, 400, 700])
