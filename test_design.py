@@ -582,6 +582,26 @@ class TestAnalysis:
         with pytest.raises(RuntimeError, match="no reads started with a primer"):
             analyze.analyze(args[0], args[1], args[2], str(bad), str(tmp_path / "res2"), threads=2)
 
+    @pytest.mark.skipif(not all(shutil.which(t) for t in ("cutadapt", "bwa", "samtools")),
+                        reason="needs cutadapt, bwa and samtools (the conda env)")
+    def test_either_orientation_recovers_reads_that_start_at_the_reverse_primer(self, tmp_path):
+        import analyze
+        import make_test_fixture as fx
+        fx.build(os.path.join(ROOT, "common_refs", "ecoli_genome.fna"), str(tmp_path / "fx"), coverage=40)
+        d = str(tmp_path / "fx")
+        raw = lambda n: open(os.path.join(d, f"FixtureSample_R{n}.fastq.gz"), "rb").read()
+        mixed = tmp_path / "mixed"                                # half the pairs as made, half with R1/R2 swapped
+        mixed.mkdir()
+        (mixed / "M_R1.fastq.gz").write_bytes(raw(1) + raw(2))
+        (mixed / "M_R2.fastq.gz").write_bytes(raw(2) + raw(1))
+        args = (str(mixed / "M_R{1,2}.fastq.gz"), os.path.join(d, "genome.fna"), os.path.join(d, "targets.bed"),
+                os.path.join(d, "primers_trimming.fasta"))
+        (default,) = analyze.analyze(*args, str(tmp_path / "a"), threads=2)
+        (either,) = analyze.analyze(*args, str(tmp_path / "b"), threads=2, either_orientation=True)
+        assert default["pct_retained"] == pytest.approx(50.0, abs=0.5)
+        assert either["pct_retained"] == 100.0 and either["pct_reads_mapped"] > 99
+        assert either["n_targets"] == 3 and either["mean_target_coverage"] > 1.8 * default["mean_target_coverage"]
+
 
 class TestSimulatorAndFixture:
     def test_simulator_deterministic_and_writes_truth(self, tmp_path):

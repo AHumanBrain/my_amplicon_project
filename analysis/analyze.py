@@ -110,22 +110,39 @@ def run(cmd, log=None):
         raise RuntimeError(f"{cmd[0]} failed: {e.stderr.strip()[-500:]}") from e
 
 
-def trim(sample, reads, fwd, rev, outdir, threads):
-    """Anchored 5' primer trimming (R1: forward primers, R2: reverse primers). Returns (files, stats)."""
-    base = ["cutadapt", "--discard-untrimmed", "-j", str(threads), "-g", f"^file:{fwd}"]
-    if len(reads) == 2:
-        out = [os.path.join(outdir, f"{sample}.trimmed_R{i}.fastq.gz") for i in (1, 2)]
-        cmd = base + ["-G", f"^file:{rev}", "-o", out[0], "-p", out[1], *reads]
-    else:
-        out = [os.path.join(outdir, f"{sample}.trimmed.fastq.gz")]
-        cmd = base + ["-o", out[0], reads[0]]
+def _cutadapt(cmd, out_dir, tag):
     log = run(cmd).stdout
-    with open(os.path.join(outdir, "cutadapt.log"), "w") as f:
+    with open(os.path.join(out_dir, f"cutadapt{tag}.log"), "w") as f:
         f.write(log)
     total = re.search(r"Total (?:read pairs|reads) processed:\s+([\d,]+)", log)
     kept = re.search(r"(?:Pairs|Reads) written \(passing filters\):\s+([\d,]+)", log)
-    n_in = int(total.group(1).replace(",", "")) if total else 0
-    n_out = int(kept.group(1).replace(",", "")) if kept else 0
+    return (int(total.group(1).replace(",", "")) if total else 0,
+            int(kept.group(1).replace(",", "")) if kept else 0)
+
+
+def trim(sample, reads, fwd, rev, outdir, threads, either_orientation=False):
+    """Anchored 5' primer trimming. Default: R1 starts with a forward primer, R2 with a reverse primer
+    (what tailed P5/P7 primers give). either_orientation: also accept R1 = reverse / R2 = forward, for
+    libraries where reads start at either end of the amplicon. Returns (files, stats)."""
+    j = ["-j", str(threads)]
+    if len(reads) == 1:
+        out = os.path.join(outdir, f"{sample}.trimmed.fastq.gz")
+        prim = ["-g", f"^file:{fwd}"] + (["-g", f"^file:{rev}"] if either_orientation else [])
+        n_in, n_out = _cutadapt(["cutadapt", "--discard-untrimmed", *j, *prim, "-o", out, reads[0]], outdir, "")
+        return [out], {"reads_in": n_in, "reads_kept": n_out, "pct_retained": 100.0 * n_out / n_in if n_in else 0.0}
+    out = [os.path.join(outdir, f"{sample}.trimmed_R{i}.fastq.gz") for i in (1, 2)]
+    n_in, n_out = _cutadapt(["cutadapt", "--discard-untrimmed", *j, "-g", f"^file:{fwd}", "-G", f"^file:{rev}",
+                             "-o", out[0], "-p", out[1], *reads], outdir, "")
+    if either_orientation:
+        # second pass with the roles swapped; concatenated gzip members are a valid gzip file
+        sw = [os.path.join(outdir, f"{sample}.swapped_R{i}.fastq.gz") for i in (1, 2)]
+        _, n_sw = _cutadapt(["cutadapt", "--discard-untrimmed", *j, "-g", f"^file:{rev}", "-G", f"^file:{fwd}",
+                             "-o", sw[0], "-p", sw[1], *reads], outdir, "_swapped")
+        for o, s in zip(out, sw):
+            with open(o, "ab") as dst, open(s, "rb") as src:
+                dst.write(src.read())
+            os.remove(s)
+        n_out += n_sw
     return out, {"reads_in": n_in, "reads_kept": n_out, "pct_retained": 100.0 * n_out / n_in if n_in else 0.0}
 
 
@@ -159,10 +176,10 @@ def align(sample, reads, genome, outdir, threads):
     return bam
 
 
-def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, provenance=None):
+def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, provenance=None, either_orientation=False):
     sdir = os.path.join(outdir, sample)
     os.makedirs(sdir, exist_ok=True)
-    trimmed, trim_stats = trim(sample, reads, fwd, rev, sdir, threads)
+    trimmed, trim_stats = trim(sample, reads, fwd, rev, sdir, threads, either_orientation)
     if trim_stats["reads_kept"] == 0:
         raise RuntimeError(f"{sample}: no reads started with a primer from the primer FASTA (all discarded). "
                            "Check that --primers belongs to this pool and that reads begin at the primer.")
@@ -193,7 +210,7 @@ def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, 
     return summary
 
 
-def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None, command=None):
+def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None, command=None, either_orientation=False):
     """Analyse every sample matching `reads`. Returns a list of summary dicts."""
     check_tools()
     for path, what in ((genome, "--genome"), (bed, "--bed"), (primers, "--primers")):
@@ -210,7 +227,7 @@ def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None, comm
     genome_index = index_genome(genome, outdir)
     provenance = {"command": command, "tool_versions": tool_versions(),
                   "inputs": {"genome": file_info(genome), "bed": file_info(bed), "primers": file_info(primers)}}
-    return [analyze_sample(sample or name, files, genome_index, bed, fwd, rev, outdir, threads, provenance)
+    return [analyze_sample(sample or name, files, genome_index, bed, fwd, rev, outdir, threads, provenance, either_orientation)
             for name, files in samples]
 
 
@@ -221,11 +238,14 @@ def main():
     ap.add_argument("--bed", required=True, help="amplicon BED from design.py (<prefix>_pool_N.bed)")
     ap.add_argument("--primers", required=True, help="trimming FASTA from design.py (<prefix>_pool_N_trimming.fasta)")
     ap.add_argument("--outdir", default="results")
+    ap.add_argument("--either-orientation", action="store_true",
+                    help="accept reads that start with either primer (R1 = forward or reverse); default: R1 = forward only")
     ap.add_argument("--threads", type=int)
     ap.add_argument("--sample", help="override the sample name (single sample only)")
     a = ap.parse_args()
     try:
-        for s in analyze(a.reads, a.genome, a.bed, a.primers, a.outdir, a.threads, a.sample, command=" ".join(sys.argv)):
+        for s in analyze(a.reads, a.genome, a.bed, a.primers, a.outdir, a.threads, a.sample, command=" ".join(sys.argv),
+                       either_orientation=a.either_orientation):
             f80 = f"{s['fold_80']:.2f}" if s["fold_80"] is not None else "n/a"
             print(f"{s['sample']}: {s['pct_retained']:.1f}% reads kept after trimming, {s['pct_reads_mapped']:.1f}% mapped, "
                   f"mean target coverage {s['mean_target_coverage']:.0f}x, fold-80 {f80}, "

@@ -8,7 +8,7 @@ tool designs, screens and packs. Read `README.md` for detail; this file is the o
 1. **Never order, pay, or contact a vendor.** Produce `<prefix>_order.csv` and stop; a human approves and orders.
 2. **Show the design before it is ordered.** Run the viewer (below) and report pools, failed targets, flags and
    tiling gaps. Do not call a design "ready" if `results.failed` or `results.tiling_gaps` in the manifest is non-empty without saying so.
-3. **Everything here is in silico.** Nothing is wet-lab validated. Say "predicted", not "works". The analysis was validated on simulated reads only.
+3. **Everything here is in silico.** Nothing is wet-lab validated. Say "predicted", not "works". The analysis was validated on simulated reads plus one real public dataset (ARTIC v3 SARS-CoV-2, `scripts/real_data_check.sh`); nothing human.
 4. **Do not silently change thresholds, seeds or defaults.** If you change an option, say which and why. Same inputs + same `--seed` must reproduce identical output; keep it that way.
 5. **No push to `main`, no merge, no force-push, no deleting data** unless the human explicitly asks in this session.
 6. **Report failures plainly** (failed targets, unsatisfiable constraints, tests that fail). Never skip or weaken a test to get green.
@@ -64,7 +64,7 @@ change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `re
 
 `design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) ·
 `analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `generate_simulated_fastq.py`) ·
-`scripts/` (`design_viewer.py`, `check_all.sh`, `genes_to_targets.py`, `make_*_example/fixture.py`) · `research/plexity_study/` (unmaintained study + figures) · `panel.example.toml` · `test_design.py`.
+`scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `research/plexity_study/` (unmaintained study + figures) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
 Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
