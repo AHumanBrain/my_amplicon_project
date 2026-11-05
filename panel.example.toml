@@ -1,0 +1,31 @@
+# Project file for design.py:   python design.py --project panel.example.toml
+# Paths are relative to this file. Any command-line option overrides what is set here.
+name = "ecoli_housekeeping_demo"
+targets = "design/targets/housekeeping.tsv"
+reference = ["common_refs/ecoli_genome.fna"]
+# specificity_fasta = ["transcripts.fa", "genome.fa"]   # default: the reference. For RNA give transcriptome AND genome.
+output_prefix = "design/output/housekeeping_demo"
+blast_dir = "ncbi_data"
+
+[design]
+layout = "auto"            # auto | tiled | sparse. tiled = at most 2 pools by position (A,C | B,D)
+amplicon_min = 150
+amplicon_max = 250
+max_hits = 1               # exact full-length hits allowed per primer in each specificity database
+# max_cross_product = 1000 # bp; default 1000 (sparse) or the max amplicon size (tiled); 0 disables
+num_candidates = 25
+monte_carlo_iters = 20
+seed = 0                   # same inputs + same seed = identical output
+# max_pools = 0            # sparse only: keep at most N pools (0 = no limit)
+# rescue = false
+# force_multiprime = false
+
+[tails]
+enabled = true             # false = order bare gene-specific primers
+forward = "ACACGACGCTCTTCCGATCT"   # truncated Illumina P5 / Read 1
+reverse = "GACGTGTGCTCTTCCGATCT"   # truncated Illumina P7 / Read 2
+
+[thresholds]               # kcal/mol
+self_dimer_dg = -9.0
+heterodimer_dg = -8.0
+end_stability_dg = -6.0

@@ -70,6 +70,36 @@ jobs:
           print("junction constraint removes genomic product:", junc["predicted_products"])
           PY
 
+      - name: Tiled design smoke test with real BLAST (two alternating pools)
+        shell: micromamba-shell {0}
+        run: |
+          TD="$RUNNER_TEMP/tiles"
+          mkdir -p "$TD"
+          python - <<PY
+          import os
+          rows = ["name\treference\tstart\tend\tamplicon_min\tamplicon_max"]
+          for i in range(12):
+              s = 100001 + i * 200
+              rows.append(f"T{i+1:02d}\tNC_000913.3\t{s}\t{s+299}\t230\t300")
+          open(os.environ["RUNNER_TEMP"] + "/tiles/targets.tsv", "w").write("\n".join(rows) + "\n")
+          PY
+          python design.py --targets "$TD/targets.tsv" --blast-dir "$TD/db" --output-prefix "$TD/out"
+          python - <<PY
+          import csv, glob, json, os
+          td = os.environ["RUNNER_TEMP"] + "/tiles"
+          m = json.load(open(td + "/out_manifest.json"))
+          assert m["layout"] == "tiled" and m["results"]["n_pools"] == 2, m["results"]
+          pool_of = {}
+          for f in glob.glob(td + "/out_pool_*.csv"):
+              for r in csv.DictReader(open(f)):
+                  pool_of[r["target_id"]] = int(r["pool"])
+          assert len(pool_of) == 12, pool_of
+          order = [pool_of[f"T{i:02d}"] for i in range(1, 13)]
+          assert all(order[i] != order[i + 1] for i in range(11)), order      # neighbours alternate pools
+          assert all(order[i] == order[i + 2] for i in range(10)), order      # A and C share a pool
+          print("tiled design alternates pools:", order)
+          PY
+
       - name: Build test fixture (genome slice, BED, primers, simulated reads)
         shell: micromamba-shell {0}
         run: python scripts/make_test_fixture.py --outdir "$RUNNER_TEMP/fixture"

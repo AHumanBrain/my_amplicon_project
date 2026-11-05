@@ -3,7 +3,6 @@ import logging
 from functools import lru_cache
 
 import primer3
-from Bio.Seq import Seq
 
 log = logging.getLogger(__name__)
 
@@ -22,9 +21,6 @@ class BioConfig:
     MAX_SELF_DIMER_DG = -9.0
     IDEAL_TM_MIN = 59.0
     IDEAL_TM_MAX = 61.0
-
-    # Hairpin clamp constraints
-    HAIRPIN_STEM_TARGET_DG = -11.9
 
 
 def _conditions():
@@ -77,22 +73,3 @@ def get_homodimer_dg(seq):
     except (OSError, ValueError, RuntimeError) as e:
         log.warning("calc_homodimer failed for %s: %s", seq, e)
         return _BAD
-
-
-def add_hairpin_clamp(oligo_sequence, primer_specific_seq,
-                      target_stem_dg=BioConfig.HAIRPIN_STEM_TARGET_DG,
-                      max_clamp_len=20):
-    """Prepend a 5' clamp whose stem dG is closest to ``target_stem_dg``.
-
-    Returns the oligo unchanged if no clamp improves on it.
-    """
-    rc = str(Seq(primer_specific_seq).reverse_complement())
-    best_oligo, best_stem_dg = oligo_sequence, 0.0
-    for i in range(1, min(max_clamp_len, len(rc)) + 1):
-        clamp = rc[:i]
-        stem_dg = get_heterodimer_dg(clamp, primer_specific_seq)
-        if abs(stem_dg - target_stem_dg) < abs(best_stem_dg - target_stem_dg):
-            best_oligo, best_stem_dg = clamp + oligo_sequence, stem_dg
-        elif stem_dg < best_stem_dg:
-            break
-    return best_oligo

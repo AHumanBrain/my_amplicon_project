@@ -1,0 +1,79 @@
+# AGENTS.md: guide for AI assistants working in this repo
+
+A platform for **custom-panel multiplex PCR**: design primers for user-defined DNA or RNA targets, pack them into pools,
+order them, analyse the sequencing, and feed coverage back into pool rebalancing. The user decides *what* to target; this
+tool designs, screens and packs. Read `README.md` for detail; this file is the operating manual.
+
+## Guardrails (follow these without being asked)
+1. **Never order, pay, or contact a vendor.** Produce `<prefix>_order.csv` and stop; a human approves and orders.
+2. **Show the design before it is ordered.** Run the viewer (below) and report pools, failed targets, flags and
+   tiling gaps. Do not call a design "ready" if `results.failed` or `results.tiling_gaps` in the manifest is non-empty without saying so.
+3. **Everything here is in silico.** Nothing is wet-lab validated. Say "predicted", not "works". Variant-calling settings were tuned on simulated reads only.
+4. **Do not silently change thresholds, seeds or defaults.** If you change an option, say which and why. Same inputs + same `--seed` must reproduce identical output; keep it that way.
+5. **No push to `main`, no merge, no force-push, no deleting data** unless the human explicitly asks in this session.
+6. **Report failures plainly** (failed targets, unsatisfiable constraints, tests that fail). Never skip or weaken a test to get green.
+
+## Workflow
+```
+ targets.tsv + reference FASTA(s)
+        │  python design.py --project panel.toml          (or flags; CLI overrides the project file)
+        ▼
+ <prefix>_order.csv, _pool_N.{csv,bed}, _pool_N_trimming.fasta, _manifest.json, [_tiling_gaps.tsv, _failed_targets.txt]
+        │  python scripts/design_viewer.py --prefix <prefix> --reference <fasta> --outdir <dir>
+        ▼                                                  HUMAN REVIEW + APPROVAL, then the human orders
+ wet lab (RT if RNA) → pooled PCR → Illumina sequencing → FASTQ
+        │  nextflow run analysis/main.nf --reads "x_R{1,2}.fastq.gz" --bed <prefix>_pool_N.bed \
+        │      --primers <prefix>_pool_N_trimming.fasta --genome <reference.fa> --outdir results   (one run per pool)
+        ▼
+ results/report/<sample>_balancing_feedback.json, _target_summary.tsv, _uniformity.png, variants/, multiqc/
+        │  python design.py --feedback <json> --targets targets.tsv --project panel.toml
+        ▼
+ <prefix>_rebalancing_recipe.csv (+ redesign of targets flagged REDESIGN)
+```
+Start a new project by copying `panel.example.toml`. Targets: see the table in README section 2.
+
+## Targets table (TSV, header required)
+Columns: `name` (required, unique) · `reference start end` (1-based inclusive region on a contig/transcript in `--reference`) **or** `sequence` ·
+`strand` (`+`/`-`: sense strand; design runs on the sense strand, forward primer = sense, reverse = antisense = RT primer for stranded RNA) ·
+`junctions` (first base AFTER each splice join; a primer must overlap one) · `span` (amplicon must contain) · `avoid` (no primer overlaps) ·
+`amplicon_min/max` · `max_hits`. Positions are 1-based within the target as given. A primer cannot overlap a `span` range.
+For RNA: design on the **transcript** and pass `--specificity-fasta transcripts.fa genome.fa` so genomic amplification shows in `predicted_products`.
+
+## Layouts
+`--layout auto` picks **tiled** if target windows or best amplicons overlap, else **sparse**.
+- **tiled**: at most 2 pools by position (A,C,.. | B,D,..); the Monte Carlo search only chooses primer pairs inside each pool.
+  Cross-target products are blocked only below the max amplicon size (A and C share a pool ~2 amplicons apart).
+  Check `tiling_gaps`: neighbours overlapping by < 2 primer lengths leave bases uncovered after primer trimming.
+- **sparse**: fewest compatible pools (Monte Carlo first-fit); facing primers of different targets closer than 1000 bp cannot share a pool.
+
+## Reading a result
+`<prefix>_manifest.json` has inputs (sha256), options, layout, per-pool targets, `failed`, `tiling_gaps`, outputs and `next_steps`.
+Per-pair CSV columns of note: `specificity_hits` (exact hits per database), `predicted_products` (in-silico PCR from exact hits).
+Viewer near-matches (≥16 aligned bp, ≤1 mismatch, exact 3' end) are informational and not enforced by the designer.
+
+## Verify before you say "done"
+```bash
+python -m pytest test_design.py -q          # fast, no external tools (BLAST is mocked)
+python -m pyflakes design.py core analysis scripts
+```
+Real tools (BLAST+, BWA, Picard, GATK, cutadapt, Nextflow) live in the conda env from `environment.yml`; CI runs a real-BLAST design smoke test
+and a real pipeline run on a small fixture (`scripts/make_test_fixture.py`, `scripts/make_rna_example.py`). Change design logic ⇒ add a test;
+change pipeline logic ⇒ run it for real, a stub run is not enough.
+
+## Map
+`design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) ·
+`analysis/main.nf` (+ `balance.py`, `plot_uniformity.py`, `analysis_utils.py`, `generate_simulated_fastq.py`) ·
+`scripts/` (`design_viewer.py`, `genes_to_targets.py`, `make_*_example/fixture.py`) · `panel.example.toml` · `test_design.py`.
+
+## Decisions already made (do not reopen without the human)
+Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
+hairpin clamp deleted · no Docker · variants are called on the sorted (not duplicate-marked) BAM because amplicon reads share starts ·
+HaplotypeCaller uses amplicon-tuned assembly settings (`--hc_args`) · merge to `main` is the human's call.
+
+## Open items (say so if relevant, do not paper over)
+Tiling does not optimise neighbour overlap (it reports gaps) · strand specificity is decided at the RT step and cannot be verified from amplicon reads ·
+dimer screening uses gene-specific sequence, not the tailed oligo · packing is a heuristic with no optimality guarantee · near-match search is informational ·
+cross-product distance (1000 bp) is a chosen default, not a validated one.
+
+## Ask the human when
+the targets or reference are ambiguous · constraints are unsatisfiable · a design has failed targets or gaps · anything would leave the machine (ordering, publishing).

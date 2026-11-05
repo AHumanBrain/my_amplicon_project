@@ -192,11 +192,6 @@ class TestDesign:
                                       extra={"span": "1-100", "amplicon_min": "40", "amplicon_max": "60"})
         assert cands == [] and "constraints" in err
 
-    def test_hairpin_clamp_is_optional_and_5prime(self, genome, monkeypatch):
-        fake_blast(monkeypatch)
-        _, cands, _ = design_target(genome, hairpin_clamp=True)
-        assert cands[0]["fwd_oligo"].endswith(cands[0]["fwd"]) and "HairpinClamp" in cands[0]["flags"]
-
     def test_rescue_only_for_unconstrained_coordinate_targets(self, genome, monkeypatch):
         fake_blast(monkeypatch)
         real = design.design_primers_for_sequence
@@ -266,6 +261,83 @@ class TestDesign:
         assert design.has_amplicon_overlap([mk("a", 0, 200), mk("b", 150, 350)])
         assert not design.has_amplicon_overlap([mk("a", 0, 200), mk("b", 200, 400)])
         assert design.is_compatible(mk("b", 150, 350), [mk("a", 0, 200)], True) == (False, "amplicon overlap")
+
+
+# ---------------------------------------------------------------- tiling
+class TestTiling:
+    F, R = "GAGACCTACCAGCTCACCTC", "TCCACGGCAATCTCGATGAT"
+
+    def cands(self, windows, contig="c", amp=200):
+        """windows: {name: (window_start, window_end)}; amplicon = first `amp` bp of each window."""
+        return {n: [{"target_id": n, "contig": contig, "start": w[0], "end": w[0] + amp, "strand": "+",
+                     "fwd": self.F, "rev": self.R, "tstart": w[0], "tend": w[1]}]
+                for n, w in windows.items()}
+
+    def chain(self):   # A,B,C,D in tandem: each window overlaps only its neighbours
+        return {"A": (0, 300), "B": (200, 500), "C": (400, 700), "D": (600, 900)}
+
+    @pytest.fixture(autouse=True)
+    def only_structural_rules(self, monkeypatch):
+        monkeypatch.setitem(design.CFG, "hetero_dimer", -100.0)   # isolate layout rules from dimer checks
+        monkeypatch.setitem(design.CFG, "end_3p", -100.0)
+        monkeypatch.setitem(design.CFG, "self_dimer", -100.0)
+
+    def test_tandem_targets_alternate_between_two_pools(self):
+        assignment, unassigned = design.assign_tiled_pools(self.cands(self.chain()))
+        assert assignment == {"A": 0, "B": 1, "C": 0, "D": 1} and unassigned == []
+
+    def test_three_mutually_overlapping_windows_cannot_be_two_coloured(self):
+        c = self.cands({"A": (0, 300), "B": (100, 400), "C": (200, 500)})
+        assignment, unassigned = design.assign_tiled_pools(c)
+        assert unassigned == ["C"] and assignment == {"A": 0, "B": 1}
+
+    def test_isolated_targets_go_to_pool_zero(self):
+        c = self.cands({"A": (0, 300), "B": (5000, 5300), "C": (9000, 9300)})
+        assert set(design.assign_tiled_pools(c)[0].values()) == {0}
+
+    def test_layout_detection(self):
+        assert design.detect_layout(self.cands(self.chain())) == "tiled"
+        assert design.detect_layout(self.cands({"A": (0, 300), "B": (5000, 5300)})) == "sparse"
+        # windows do not overlap but the chosen amplicons do (amplicon longer than its window slot)
+        assert design.detect_layout(self.cands({"A": (0, 150), "B": (160, 310)}, amp=250)) == "tiled"
+
+    def test_fixed_pools_hold_A_C_and_B_D(self, monkeypatch):
+        monkeypatch.setitem(design.CFG, "max_cross", 250)           # tiled default = max amplicon size
+        c = self.cands(self.chain())
+        assignment, _ = design.assign_tiled_pools(c)
+        pools, unplaced = design.pack_fixed_pools(c, assignment, iterations=3)
+        assert unplaced == [] and [sorted(x["target_id"] for x in p) for p in pools] == [["A", "C"], ["B", "D"]]
+
+    def test_default_cross_product_limit_would_block_tiling(self, monkeypatch):
+        # A and C share a pool: A's forward primer faces C's reverse primer ~600 bp away.
+        c = self.cands(self.chain())
+        assert design.cross_product_size(c["A"][0], c["C"][0]) == 600
+        monkeypatch.setitem(design.CFG, "max_cross", 1000)           # the sparse default
+        assignment, _ = design.assign_tiled_pools(c)
+        _, unplaced = design.pack_fixed_pools(c, assignment, iterations=2)
+        assert unplaced                                              # tiling is impossible with it...
+        monkeypatch.setitem(design.CFG, "max_cross", 250)            # ...and fine with the tiled default
+        assert design.pack_fixed_pools(c, assignment, iterations=2)[1] == []
+
+    def test_tiling_gaps_after_primer_trimming(self):
+        def pool(*spans, strand="+"):
+            return [[{"contig": "c", "start": s, "end": e, "strand": strand, "fwd": self.F, "rev": self.R}
+                     for s, e in spans]]
+        # neighbours overlap by 20 bp = one primer length: primers trimmed from both leave a 20 bp hole
+        assert design.tiling_gaps(pool((0, 250), (230, 480))) == [("c", 230, 250)]
+        # overlap of 40 bp (two primer lengths) leaves no hole; neither does a bigger one
+        assert design.tiling_gaps(pool((0, 250), (210, 460))) == []
+        assert design.tiling_gaps(pool((0, 250), (150, 400))) == []
+        # a real gap between amplicons is reported, and minus-strand amplicons behave the same
+        assert design.tiling_gaps(pool((0, 250), (300, 550), strand="-")) == [("c", 230, 320)]
+        # the outer ends of the region are not gaps
+        assert design.tiling_gaps(pool((0, 250))) == []
+
+    def test_amplicons_overlapping_inside_one_pool_are_not_allowed(self, monkeypatch):
+        monkeypatch.setitem(design.CFG, "max_cross", 0)
+        c = self.cands({"A": (0, 300), "C": (100, 400)}, amp=250)     # A and C overlap but were assigned together
+        _, unplaced = design.pack_fixed_pools(c, {"A": 0, "C": 0}, iterations=2)
+        assert unplaced == ["C"]
 
 
 # ---------------------------------------------------------------- strand and tails
@@ -455,6 +527,63 @@ class TestSimulatorAndFixture:
         assert fasta[0] == ">t1_F" and len(fasta[1]) == fx.PRIMER_LEN
         for f in ("genome.fna", "targets.bed", "FixtureSample_R1.fastq.gz", "FixtureSample_R2.fastq.gz"):
             assert os.path.exists(os.path.join(out, f))
+
+
+class TestProjectAndManifest:
+    def write(self, tmp_path, text):
+        f = tmp_path / "panel.toml"
+        f.write_text(text)
+        return str(f)
+
+    def test_project_sets_defaults_and_cli_overrides(self, tmp_path):
+        proj = self.write(tmp_path, 'name = "demo"\ntargets = "t.tsv"\nreference = ["a.fa", "b.fa"]\n'
+                          'output_prefix = "out/p"\n[design]\nlayout = "tiled"\namplicon_max = 300\nseed = 7\n'
+                          'rescue = true\n[tails]\nenabled = false\n[thresholds]\nself_dimer_dg = -10\n')
+        _, args = design.parse_args(["--project", proj, "--seed", "9"])
+        assert args.targets == str(tmp_path / "t.tsv") and args.output_prefix == str(tmp_path / "out/p")
+        assert args.reference == [str(tmp_path / "a.fa"), str(tmp_path / "b.fa")]
+        assert (args.layout, args.amplicon_max, args.rescue, args.project_name) == ("tiled", 300, True, "demo")
+        assert args.seed == 9                      # CLI wins over the project file
+        assert args.no_tails is True and design.resolve_tails(args) == ("", "")
+        assert args.max_self_dimer_dg == -10
+
+    def test_no_project_keeps_defaults(self):
+        _, args = design.parse_args([])
+        assert args.layout == "auto" and args.no_tails is False and args.max_cross_product is None
+
+    @pytest.mark.parametrize("text,msg", [
+        ('bogus = 1\n', "unknown key 'bogus'"),
+        ('[nope]\nx = 1\n', "unknown section"),
+        ('[design]\nseed = "x"\n', "type int"),
+        ('[design]\nrescue = 1\n', "type bool"),
+        ('reference = "a.fa"\n', "type paths"),
+        ('[design]\nmax_cross = 5\n', "unknown key 'max_cross'")])
+    def test_bad_project_is_rejected_with_a_clear_message(self, tmp_path, text, msg):
+        with pytest.raises(ValueError, match=msg):
+            design.load_project(self.write(tmp_path, text))
+
+    def test_example_project_file_is_valid_and_points_at_real_files(self):
+        _, args = design.parse_args(["--project", os.path.join(ROOT, "panel.example.toml")])
+        assert os.path.exists(args.targets) and all(os.path.exists(r) for r in args.reference)
+        assert args.layout == "auto" and design.resolve_tails(args) == (design.P5_TAIL, design.P7_TAIL)
+
+    def test_manifest_records_inputs_results_and_next_steps(self, tmp_path, genome, monkeypatch):
+        fake_blast(monkeypatch)
+        (tmp_path / "t.tsv").write_text("name\treference\tstart\tend\ng1\tchr\t501\t1000\n")
+        (tmp_path / "r.fa").write_text(">chr\nACGT\n")
+        _, args = design.parse_args(["--targets", str(tmp_path / "t.tsv"), "--reference", str(tmp_path / "r.fa"),
+                                     "--output-prefix", str(tmp_path / "o")])
+        c = design_target(genome)[1]
+        m = design.build_manifest(args, "sparse", [[dict(c[0], rank_used=0)]], ["x failed"], 2,
+                                  [("chr", 10, 30)])
+        assert m["layout"] == "sparse" and m["results"]["targets_requested"] == 2
+        assert m["git_dirty"] in (True, False, None)
+        assert m["results"]["targets_designed"] == 1 and m["results"]["failed"] == ["x failed"]
+        assert m["results"]["pools"] == [{"pool": 1, "n_targets": 1, "targets": ["g1"]}]
+        assert m["results"]["tiling_gaps"] == [{"contig": "chr", "start": 10, "end": 30, "length": 20}]
+        assert m["inputs"]["targets"]["sha256"] and m["inputs"]["reference"][0]["size_bytes"] == 10
+        assert any(o.endswith("_order.csv") for o in m["outputs"]) and any("design_viewer" in n for n in m["next_steps"])
+        assert m["options"]["seed"] == 0 and json.dumps(m)       # JSON-serialisable
 
 
 class TestViewer:

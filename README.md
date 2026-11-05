@@ -44,7 +44,19 @@ Optional: simulate reads with `analysis/generate_simulated_fastq.py` (also write
 
 ---
 
-## 2. Targets table
+## 2. Project file and run manifest
+
+Put the options in a TOML file instead of a long command line (`panel.example.toml` is annotated; paths are relative to the file, and any command-line option overrides it):
+
+```bash
+python design.py --project panel.example.toml
+```
+
+Every run writes `<prefix>_manifest.json`: inputs (path, size, sha256), all options, layout used, git commit and whether the tree was dirty, per-pool targets, failed targets, tiling gaps, output files and the suggested next command. It is the machine-readable summary an assistant should read first. `AGENTS.md` is the operating guide for AI assistants (workflow, guardrails, what not to claim).
+
+---
+
+## 3. Targets table
 
 One TSV row per target. Only `name` is always required; give **either** a region (`reference` + `start` + `end`, 1-based inclusive, cut from `--reference`) **or** a raw `sequence`.
 
@@ -92,7 +104,7 @@ For RNA also align to the transcript FASTA in the pipeline (`--genome cdna.fa`);
 
 ---
 
-## 3. Design (`design.py`)
+## 4. Design (`design.py`)
 
 ### Per-target logic
 
@@ -117,18 +129,30 @@ flowchart TD
 | Amplicon | 150–250 bp by default, per target via `amplicon_min/max` (fallbacks widen or narrow it); must fit inside the target |
 | Dimer limits (kcal/mol) | self −9.0, heterodimer −8.0, 3′ end −6.0 (`--max-*-dg`) |
 
-### Packing into pools
+### Layouts and packing into pools
+
+`--layout auto` (default) picks **tiled** if target windows or the chosen amplicons overlap, otherwise **sparse**.
 
 ```mermaid
-flowchart LR
-    C["ranked candidates per target"] --> M["Monte Carlo first-fit<br/>iteration 0 genomic order, then shuffled (--seed)"]
-    M --> Q{"fits an existing pool?"}
-    Q -- "no amplicon overlap and no primer cross-dimer" --> A["place best-ranked compatible candidate"]
-    Q -- "no" --> N["open a new pool"]
-    A & N --> K["keep the run with fewest pools"]
+flowchart TD
+    C["ranked candidates per target"] --> L{"layout"}
+    L -- "sparse" --> M["Monte Carlo first-fit: fewest pools<br/>iteration 0 genomic order, then shuffled (--seed)"]
+    L -- "tiled" --> T["colour overlapping windows along the genome:<br/>A, C, ... to pool 1 and B, D, ... to pool 2 (max 2)"]
+    T --> F["Monte Carlo first-fit picks the primer pair<br/>for each target INSIDE its fixed pool"]
+    M --> K["compatible = no amplicon overlap and no<br/>primer cross-dimer or cross-product in the pool"]
+    F --> K
+    K --> OUT["pools + failed targets + tiling gaps"]
 ```
 
-Overlapping amplicons (tiled designs) are never put in the same pool. Facing primers from different targets are also kept apart (`--max-cross-product`): on a dense 52-target test the old overlap-only check left 36 such designed-primer products between 257 bp and 2 kb in the same pool. Everything else is packed on primer-dimer compatibility.
+| | sparse (interspersed) | tiled (tandem) |
+|---|---|---|
+| Pools | fewest that are compatible (1 whenever possible; `--max-pools N` caps it) | **at most 2**, alternating by position |
+| Who decides the pool | the search | the genome order |
+| What the search decides | pool and primer pair | primer pair only |
+| Cross-target product block | facing primers closer than 1000 bp | closer than the max amplicon size (A and C share a pool about two amplicons apart) |
+| Failure mode | targets left over under `--max-pools` | a target with no compatible pair in its pool, or a window overlapped by 2+ others |
+
+**Tiling and blind spots.** Primers are trimmed before alignment, so two neighbouring amplicons that overlap by less than two primer lengths leave `40 − overlap` bp covered by no insert. Tiled designs report these in the log, `<prefix>_tiling_gaps.tsv` and the manifest. Make tile windows overlap generously (100 bp or more) and keep `amplicon_min` close to the window length; the tool does not yet optimise neighbour overlap itself.
 
 ### Outputs (`--output-prefix`)
 
@@ -147,21 +171,20 @@ Overlapping amplicons (tiled designs) are never put in the same pool. Facing pri
 | `--reference` | E. coli | FASTA(s) that region targets are cut from |
 | `--specificity-fasta` | the reference | FASTA(s) to screen primers against (give transcriptome **and** genome for RNA) |
 | `--max-hits` | 1 | allowed exact hits per primer per database |
-| `--max-cross-product` | 1000 | primers of **different** targets that face each other closer than this (bp) cannot share a pool; 0 disables |
+| `--max-cross-product` | 1000 sparse / max amplicon tiled | primers of **different** targets that face each other closer than this (bp) cannot share a pool; 0 disables |
 | `--fwd-tail` / `--rev-tail` / `--no-tails` | Illumina P5 / P7 20-mers | 5′ tails on the forward / reverse primer |
 | `--num-candidates` | 25 | pairs designed per target |
 | `--monte-carlo-iters` / `--seed` | 20 / 0 | packing restarts / reproducibility |
-| `--force-single-pool` | off | keep the largest compatible set; list the rest |
+| `--layout` | auto | `auto`, `tiled` (max 2 pools by position) or `sparse` (fewest pools) |
+| `--max-pools` | 0 | sparse only: keep at most N pools (0 = no limit); `--force-single-pool` = 1 |
 | `--force-sparse` | off | never allow overlapping amplicons in one pool |
 | `--force-multiprime` | off | allow multi-copy primers (e.g. 16S) |
 | `--rescue` | off | shift the window of unconstrained region targets if no pair passes |
-| `--add-hairpin-clamp` | off | experimental 5′ hairpin stem; see note below |
 
-> **Hairpin clamp:** a 5′ extension intended to suppress primer dimers. It is untested here (no wet-lab or simulation evidence it helps) and unrelated to mini-amplicons, which only pool splitting prevents. Treat as experimental.
 
 ---
 
-## 4. Analysis (`analysis/main.nf`)
+## 5. Analysis (`analysis/main.nf`)
 
 ```mermaid
 flowchart TD
@@ -202,7 +225,7 @@ flowchart LR
 
 ---
 
-## 5. Feedback loop
+## 6. Feedback loop
 
 ```mermaid
 flowchart LR
@@ -217,7 +240,7 @@ flowchart LR
 
 ---
 
-## 6. Ordering and running the primers
+## 7. Ordering and running the primers
 
 * Order `<prefix>_order.csv` oligos as standard primers (desalted is fine for PCR; plate format is convenient). Pool by the `pool` column.
 * One pool = one PCR tube. Overlapping amplicons are already in different pools.
@@ -225,18 +248,19 @@ flowchart LR
 
 ---
 
-## 7. Verified results
+## 8. Verified results
 
 Run with real BLAST+, BWA, Picard, GATK and Cutadapt from `environment.yml` (simulated reads, 300×).
 
 | Test | Result |
 |---|---|
 | 21-gene panel | 1 pool, every primer has exactly 1 perfect genomic hit, no predicted off-target products |
-| Synthetic spliced gene, real BLAST | junction-constrained target: no genomic product predicted; unconstrained: same-size genomic product flagged (table in section 2) |
+| Synthetic spliced gene, real BLAST | junction-constrained target: no genomic product predicted; unconstrained: same-size genomic product flagged (table in section 3) |
 | Pipeline | 10 processes succeed in ~1.5 min; 6,299 / 6,300 pairs retained after trimming |
 | Panel coverage | mean 397×, fold-80 1.33, 100 % of targets above 0.2× |
 | Variants (47 injected SNVs) | 40 called, 0 false positives; all 7 misses lie under primers (trimmed by design), 0 in amplicon interiors |
-| Unit tests | 36 passing; CI runs them plus a real-BLAST design smoke test and a real pipeline run on a small fixture |
+| Tiled design, real BLAST (12 overlapping 300 bp windows) | **2 pools of 6, alternating (T01,T03,.. | T02,T04,..)**; all 12 placed, contiguous coverage, but 60 bp uncovered after primer trimming at three 20 bp overlaps (reported) |
+| Unit tests | 64 passing; CI runs them plus a real-BLAST design smoke test and a real pipeline run on a small fixture |
 
 ```mermaid
 pie showData
@@ -249,7 +273,7 @@ pie showData
 
 ---
 
-## 8. Inspecting specificity
+## 9. Inspecting specificity
 
 ```bash
 python scripts/design_viewer.py --prefix design/output/panel --reference common_refs/ecoli_genome.fna --outdir panel_view
@@ -259,7 +283,7 @@ Writes `specificity.html` (self-contained: genome overview, sortable target tabl
 
 ---
 
-## 9. Repository
+## 10. Repository
 
 ```mermaid
 flowchart TD
@@ -269,6 +293,7 @@ flowchart TD
     R --> S["scripts/<br/>make_test_fixture.py, make_rna_example.py, genes_to_targets.py"]
     R --> X["design/targets/, common_refs/ (E. coli K-12 genome + GFF)"]
     R --> T["test_design.py, .github/workflows/test-pipeline.yml, environment.yml"]
+    R --> G["AGENTS.md, CLAUDE.md, panel.example.toml"]
 ```
 
 **Removed in this pruning** (all recoverable from git history): the tail-only mode and the second oligo format (tails themselves are back, see above), Docker, MarkDuplicates, bigWig tracks, Mutect2 / `--mode`, the HTML dashboard, the k-mer uniqueness and target-curation scripts, the simulator's thermal model, stale example panels, the duplicate uncleaned genome, and the pandas/deeptools dependencies.
