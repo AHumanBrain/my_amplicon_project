@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full local check with the REAL tools (BLAST+, bwa, samtools, cutadapt). About 20 seconds.
+# Full local check with the REAL tools (BLAST+, bwa, samtools, cutadapt). About 2 minutes.
 #   micromamba activate amplicon_pipeline && bash scripts/check_all.sh
 # Run it before merging. The automatic CI only does the fast part (lint + unit tests).
 # Scratch files go to $CHECK_WORKDIR (default: a new temp dir that is left in place, nothing is deleted).
@@ -45,25 +45,34 @@ print("ok: junction constraint removes the genomic product:", rows["TX1_junction
 PY
 
 step "tiled design: 12 overlapping tiles -> two alternating pools"
-python - <<'PY'
-import os
-rows = ["name\treference\tstart\tend\tamplicon_min\tamplicon_max"]
-for i in range(12):
-    s = 100001 + i * 200
-    rows.append(f"T{i+1:02d}\tNC_000913.3\t{s}\t{s+299}\t230\t300")
-os.makedirs(os.environ["WORK"] + "/tiles", exist_ok=True)
-open(os.environ["WORK"] + "/tiles/targets.tsv", "w").write("\n".join(rows) + "\n")
-PY
-python design.py --targets "$WORK/tiles/targets.tsv" --blast-dir "$WORK/db" --output-prefix "$WORK/tiles/out" >/dev/null 2>&1
+python design.py --targets design/targets/ecoli_tiled_12.tsv --blast-dir "$WORK/db" --output-prefix "$WORK/tiles" >/dev/null 2>&1
 python - <<'PY'
 import csv, glob, json, os
 td = os.environ["WORK"] + "/tiles"
-m = json.load(open(td + "/out_manifest.json"))
+m = json.load(open(td + "_manifest.json"))
 assert m["layout"] == "tiled" and m["results"]["n_pools"] == 2, m["results"]
-pool = {r["target_id"]: int(r["pool"]) for f in glob.glob(td + "/out_pool_*.csv") for r in csv.DictReader(open(f))}
-order = [pool[f"T{i:02d}"] for i in range(1, 13)]
+pool = {r["target_id"]: int(r["pool"]) for f in glob.glob(td + "_pool_*.csv") for r in csv.DictReader(open(f))}
+order = [pool[f"T{i:03d}"] for i in range(1, 13)]
 assert len(pool) == 12 and all(order[i] != order[i + 1] for i in range(11)) and all(order[i] == order[i + 2] for i in range(10)), order
 print("ok: pools alternate:", order)
+PY
+
+step "50 genome-wide E. coli genes: design, simulate reads, analyse (the whole loop at scale)"
+python design.py --targets design/targets/ecoli_spread_50.tsv --blast-dir "$WORK/db" \
+  --output-prefix "$WORK/s50" --monte-carlo-iters 5 2>&1 | grep -E "Layout|targets ->" | sed 's/.*INFO - //'
+python analysis/generate_simulated_fastq.py --genome common_refs/ecoli_genome.fna --bed "$WORK/s50_pool_1.bed" \
+  --output-dir "$WORK/s50_reads" --sample-name S50 --coverage 100 --seed 1 >/dev/null
+python analysis/analyze.py --reads "$WORK/s50_reads/S50_R{1,2}.fastq.gz" --genome common_refs/ecoli_genome.fna \
+  --bed "$WORK/s50_pool_1.bed" --primers "$WORK/s50_pool_1_trimming.fasta" --outdir "$WORK/s50_res"
+python - <<'PY'
+import json, os
+w = os.environ["WORK"]
+s = json.load(open(w + "/s50_res/S50/S50_summary.json"))
+n_pool1 = sum(1 for _ in open(w + "/s50_pool_1.bed"))
+assert s["n_targets"] == n_pool1 >= 25, (s["n_targets"], n_pool1)
+assert s["pct_retained"] > 99 and s["pct_reads_mapped"] > 99 and s["pct_on_target_bases"] > 95, s
+assert s["uniformity_0.2x"] > 90, s["uniformity_0.2x"]
+print(f"ok: {n_pool1} amplicons, mean {s['mean_target_coverage']:.0f}x, {s['uniformity_0.2x']:.0f}% above 0.2x mean")
 PY
 
 step "analysis from the command line on the small fixture (trim, align, coverage, feedback)"

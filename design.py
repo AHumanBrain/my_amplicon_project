@@ -855,6 +855,20 @@ def _file_info(path):
     return {'path': os.path.abspath(path), 'size_bytes': os.path.getsize(path), 'sha256': _sha256(path)}
 
 
+def tool_versions():
+    """Versions that can change the result (primer3 changes dG values; BLAST changes specificity hits)."""
+    import platform
+    import Bio
+    out = {'python': platform.python_version(), 'primer3-py': getattr(primer3, '__version__', 'unknown'),
+           'biopython': Bio.__version__}
+    try:
+        text = subprocess.run(['blastn', '-version'], capture_output=True, text=True, timeout=10).stdout
+        out['blast'] = (re.search(r'blastn:\s*(\S+)', text) or [None, 'unknown'])[1]
+    except (OSError, subprocess.SubprocessError):
+        out['blast'] = 'not installed'
+    return out
+
+
 def build_manifest(args, layout, pools, failed, n_requested, gaps=()):
     """Machine-readable record of one design run (inputs, options, results, outputs, next steps)."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -873,7 +887,7 @@ def build_manifest(args, layout, pools, failed, n_requested, gaps=()):
     ranks = [c['rank_used'] for p in pools for c in p]
     return {
         'tool': 'design.py', 'created_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
-        'git_commit': commit, 'git_dirty': dirty, 'project': getattr(args, 'project', None), 'name': getattr(args, 'project_name', None),
+        'git_commit': commit, 'git_dirty': dirty, 'tool_versions': tool_versions(), 'project': getattr(args, 'project', None), 'name': getattr(args, 'project_name', None),
         'layout': layout, 'max_cross_product_bp': CFG['max_cross'],
         'options': {k: getattr(args, k) for k in (
             'layout', 'max_pools', 'max_hits', 'amplicon_min', 'amplicon_max', 'max_product', 'max_cross_product',

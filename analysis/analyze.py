@@ -12,8 +12,10 @@ a `*` in the head matches several samples. Per sample it writes, in <outdir>/<sa
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -31,6 +33,35 @@ def check_tools():
     missing = [t for t in TOOLS if not shutil.which(t)]
     if missing:
         raise RuntimeError(f"missing on PATH: {', '.join(missing)}. Activate the conda env from environment.yml.")
+
+
+def tool_versions():
+    """Versions of everything that touches the data."""
+    import numpy
+    probes = (("cutadapt", ["cutadapt", "--version"], r"(\d[\w.]*)"), ("samtools", ["samtools", "--version"], r"samtools (\S+)"),
+              ("bwa", ["bwa"], r"Version: (\S+)"))
+    out = {"python": platform.python_version(), "numpy": numpy.__version__}
+    for name, cmd, rx in probes:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            m = re.search(rx, r.stdout + r.stderr)
+            out[name] = m.group(1) if m else "unknown"
+        except (OSError, subprocess.SubprocessError):
+            out[name] = "not installed"
+    return out
+
+
+def file_info(path, hash_limit=64 * 1024 * 1024):
+    """Path, size and sha256 (skipped above hash_limit bytes: hashing a multi-GB FASTQ is not worth the wait)."""
+    size = os.path.getsize(path)
+    digest = None
+    if size <= hash_limit:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        digest = h.hexdigest()
+    return {"path": os.path.abspath(path), "size_bytes": size, "sha256": digest}
 
 
 def find_samples(pattern):
@@ -128,7 +159,7 @@ def align(sample, reads, genome, outdir, threads):
     return bam
 
 
-def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads):
+def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, provenance=None):
     sdir = os.path.join(outdir, sample)
     os.makedirs(sdir, exist_ok=True)
     trimmed, trim_stats = trim(sample, reads, fwd, rev, sdir, threads)
@@ -155,13 +186,14 @@ def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads):
                         f"{r['recommended_adjustment']:.2f}", r["action"]])
     plotted = plot_uniformity.plot_uniformity(targets, os.path.join(sdir, f"{sample}_uniformity.png"), sample)
     summary = {"sample": sample, **trim_stats, **panel, "uniformity_0.2x": feedback["overall_metrics"]["uniformity_0.2x"],
-               "uniformity_plot": plotted}
+               "uniformity_plot": plotted,
+               "provenance": {**(provenance or {}), "reads": [file_info(r) for r in reads]}}
     with open(os.path.join(sdir, f"{sample}_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     return summary
 
 
-def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None):
+def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None, command=None):
     """Analyse every sample matching `reads`. Returns a list of summary dicts."""
     check_tools()
     for path, what in ((genome, "--genome"), (bed, "--bed"), (primers, "--primers")):
@@ -176,7 +208,9 @@ def analyze(reads, genome, bed, primers, outdir, threads=None, sample=None):
     os.makedirs(outdir, exist_ok=True)
     fwd, rev = split_primers(primers, outdir)
     genome_index = index_genome(genome, outdir)
-    return [analyze_sample(sample or name, files, genome_index, bed, fwd, rev, outdir, threads)
+    provenance = {"command": command, "tool_versions": tool_versions(),
+                  "inputs": {"genome": file_info(genome), "bed": file_info(bed), "primers": file_info(primers)}}
+    return [analyze_sample(sample or name, files, genome_index, bed, fwd, rev, outdir, threads, provenance)
             for name, files in samples]
 
 
@@ -191,7 +225,7 @@ def main():
     ap.add_argument("--sample", help="override the sample name (single sample only)")
     a = ap.parse_args()
     try:
-        for s in analyze(a.reads, a.genome, a.bed, a.primers, a.outdir, a.threads, a.sample):
+        for s in analyze(a.reads, a.genome, a.bed, a.primers, a.outdir, a.threads, a.sample, command=" ".join(sys.argv)):
             f80 = f"{s['fold_80']:.2f}" if s["fold_80"] is not None else "n/a"
             print(f"{s['sample']}: {s['pct_retained']:.1f}% reads kept after trimming, {s['pct_reads_mapped']:.1f}% mapped, "
                   f"mean target coverage {s['mean_target_coverage']:.0f}x, fold-80 {f80}, "

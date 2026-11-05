@@ -568,6 +568,9 @@ class TestAnalysis:
         assert s["sample"] == "FixtureSample" and s["n_targets"] == 3
         assert s["pct_retained"] == 100.0 and s["pct_reads_mapped"] > 99 and s["pct_on_target_bases"] > 95
         assert s["mean_target_coverage"] > 20
+        prov = s["provenance"]                                   # what a re-run needs to reproduce or compare
+        assert {"cutadapt", "samtools", "bwa", "python"} <= set(prov["tool_versions"]) and "unknown" not in prov["tool_versions"].values()
+        assert all(prov["inputs"][k]["sha256"] for k in ("genome", "bed", "primers")) and len(prov["reads"]) == 2
         for f in ("FixtureSample.sorted.bam", "FixtureSample_balancing_feedback.json", "FixtureSample_target_summary.tsv",
                   "FixtureSample_uniformity.png", "target_coverage.tsv", "cutadapt.log", "FixtureSample_summary.json"):
             assert os.path.exists(os.path.join(tmp_path, "res", "FixtureSample", f)), f
@@ -639,6 +642,13 @@ class TestProjectAndManifest:
         assert os.path.exists(args.targets) and all(os.path.exists(r) for r in args.reference)
         assert args.layout == "auto" and design.resolve_tails(args) == (design.P5_TAIL, design.P7_TAIL)
 
+    def test_file_info_hashes_small_files_only(self, tmp_path):
+        import analyze
+        f = tmp_path / "x"
+        f.write_bytes(b"abc")
+        assert analyze.file_info(str(f))["sha256"] == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        assert analyze.file_info(str(f), hash_limit=2)["sha256"] is None
+
     def test_manifest_records_inputs_results_and_next_steps(self, tmp_path, genome, monkeypatch):
         fake_blast(monkeypatch)
         (tmp_path / "t.tsv").write_text("name\treference\tstart\tend\ng1\tchr\t501\t1000\n")
@@ -650,6 +660,7 @@ class TestProjectAndManifest:
                                   [("chr", 10, 30)])
         assert m["layout"] == "sparse" and m["results"]["targets_requested"] == 2
         assert m["git_dirty"] in (True, False, None)
+        assert {"python", "primer3-py", "biopython", "blast"} <= set(m["tool_versions"])
         assert m["results"]["targets_designed"] == 1 and m["results"]["failed"] == ["x failed"]
         assert m["results"]["pools"] == [{"pool": 1, "n_targets": 1, "targets": ["g1"]}]
         assert m["results"]["tiling_gaps"] == [{"contig": "chr", "start": 10, "end": 30, "length": 20}]
@@ -702,6 +713,28 @@ class TestViewer:
         bed = open(tmp_path / "amplicons.bed").read().splitlines()[1].split("\t")
         assert bed[5] == "-" and bed[9] == "2" and bed[10] == "20,20" and bed[11] == "0,180"
         assert (tmp_path / "session.xml").exists()
+
+
+class TestEcoliTargets:
+    def test_spread_sets_are_genome_wide_unique_and_committed(self):
+        import make_ecoli_targets as mk
+        genes = mk.read_genes(os.path.join(ROOT, "common_refs", "genomic.gff"), 600)
+        assert len(genes) > 2500 and not any(mk.REPEATS.match(g[0]) for g in genes)
+        picks = mk.spread(genes, 100)
+        starts = [g[2] for g in picks]
+        assert len({g[0] for g in picks}) == 100 and starts == sorted(starts)
+        assert starts[-1] - starts[0] > 4_000_000 and min(b - a for a, b in zip(starts, starts[1:])) > 20_000
+        for n in (50, 100, 250, 500):                        # the committed files are exactly what the generator makes
+            rows = [ln.rstrip("\n").split("\t") for ln in open(os.path.join(ROOT, "design", "targets", f"ecoli_spread_{n}.tsv"))][1:]
+            assert [r[0] for r in rows] == [g[0] for g in mk.spread(genes, n)]
+        with pytest.raises(ValueError, match="eligible"):
+            mk.spread(genes, 10**6)
+
+    def test_tiles_overlap_by_window_minus_step(self):
+        import make_ecoli_targets as mk
+        t = mk.tiled(4, 1000, 300, 200)
+        assert [(x[2], x[3]) for x in t] == [(1000, 1299), (1200, 1499), (1400, 1699), (1600, 1899)]
+        assert all(x[4:] == (230, 300) for x in t)
 
 
 def test_genes_to_targets(tmp_path):
