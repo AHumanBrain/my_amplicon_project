@@ -23,6 +23,7 @@ from functools import lru_cache
 
 import primer3
 from Bio import SeqIO
+from Bio.Seq import Seq
 from tqdm import tqdm
 
 from core.biophysics import (BioConfig, add_hairpin_clamp, get_end_stability_dg,
@@ -35,10 +36,15 @@ CFG = {
     'self_dimer': BioConfig.MAX_SELF_DIMER_DG,
     'hetero_dimer': BioConfig.MAX_HETERODIMER_DG,
     'end_3p': BioConfig.END_STABILITY_DG_THRESHOLD,
+    'max_cross': 1000,   # bp; facing primers of different targets in one pool must be farther apart
 }
 RESCUE_SHIFTS = [0, -25, 25, -45, 45]  # bp window shifts tried with --rescue
 HAIRPIN_CLAMP_MAX_LEN = 20
-TARGET_COLUMNS = ['name', 'reference', 'start', 'end', 'sequence', 'junctions', 'span', 'avoid',
+# Truncated Illumina tails: the 3' 20 nt of the TruSeq Read 1 / Read 2 sequencing-primer sites.
+# A later index PCR completes the adapters. Reads therefore start at the gene-specific primer.
+P5_TAIL = 'ACACGACGCTCTTCCGATCT'   # 5' of every forward (sense) primer
+P7_TAIL = 'GACGTGTGCTCTTCCGATCT'   # 5' of every reverse (antisense) primer
+TARGET_COLUMNS = ['name', 'reference', 'start', 'end', 'strand', 'sequence', 'junctions', 'span', 'avoid',
                   'amplicon_min', 'amplicon_max', 'max_hits']
 
 
@@ -58,6 +64,10 @@ def sanitize_name(text):
 # --------------------------------------------------------------------------
 # Targets table
 # --------------------------------------------------------------------------
+
+def revcomp(seq):
+    return str(Seq(seq).reverse_complement())
+
 
 def _int_list(text):
     return [int(x) for x in re.split(r'[,\s]+', text.strip()) if x]
@@ -118,22 +128,32 @@ def resolve_target(row, refs, default_range=(150, 250)):
                 return None, f"{name}: region {start}-{end} is outside '{contig}' (length {len(refs[contig].seq)})."
             seq, offset = str(refs[contig].seq[start - 1:end]).upper(), start - 1
 
+        strand = g('strand') or '+'
+        if strand not in ('+', '-'):
+            return None, f"{name}: 'strand' must be + or - (got '{strand}')."
         n = len(seq)
-        # User positions are 1-based within the target; primer3 wants 0-based index of the last
-        # base BEFORE a junction (junction column = first base AFTER the join, hence p - 2).
-        junctions = [p - 2 for p in _int_list(g('junctions'))]
-        if any(not 0 <= j < n - 1 for j in junctions):
+        # User positions are 1-based within the target AS GIVEN (reference orientation).
+        junction_pos = _int_list(g('junctions'))   # first base AFTER the join
+        if any(not 2 <= p <= n for p in junction_pos):
             return None, f"{name}: 'junctions' must be between 2 and {n} (1-based, first base after the join)."
         span = _ranges(g('span'))
         avoid = _ranges(g('avoid'))
         if any(not 1 <= a <= b <= n for a, b in span + avoid):
             return None, f"{name}: 'span'/'avoid' ranges must lie within 1-{n}."
+        if strand == '-':
+            # Design is always done on the sense strand: reverse-complement and flip every position.
+            seq = revcomp(seq)
+            junction_pos = [n + 2 - p for p in junction_pos]
+            span = [(n + 1 - b, n + 1 - a) for a, b in span]
+            avoid = [(n + 1 - b, n + 1 - a) for a, b in avoid]
+        # primer3 wants the 0-based index of the last base BEFORE a junction (first-after is p, so p - 2).
+        junctions = [p - 2 for p in junction_pos]
         lo = int(g('amplicon_min') or default_range[0])
         hi = int(g('amplicon_max') or default_range[1])
         if not 40 <= lo <= hi:
             return None, f"{name}: need 40 <= amplicon_min <= amplicon_max (got {lo}, {hi})."
         return {
-            'name': name, 'seq': seq, 'contig': contig, 'offset': offset,
+            'name': name, 'seq': seq, 'contig': contig, 'offset': offset, 'strand': strand,
             'coordinate_based': not seq_text, 'end': offset + n,
             'junctions': junctions, 'span': [(a - 1, b - a + 1) for a, b in span],
             'avoid': [(a - 1, b - a + 1) for a, b in avoid],
@@ -266,7 +286,7 @@ def passes_dimer_filters(fwd, rev):
 
 
 def process_single_target(target, refs, dbs, max_hits=1, force_multiprime=False, hairpin_clamp=False,
-                          rescue=False, num_candidates=25, max_product=2000):
+                          rescue=False, num_candidates=25, max_product=2000, tails=('', '')):
     """Design candidate pairs for one resolved target.
 
     `dbs` is a list of (name, blast_prefix). A primer is accepted if its exact-hit count is
@@ -282,11 +302,13 @@ def process_single_target(target, refs, dbs, max_hits=1, force_multiprime=False,
             log.info("Rescue: shifting window %+d bp for %s", shift, name)
             ref = refs[target['contig']].seq
             lo_i, hi_i = max(0, target['offset'] + shift), min(len(ref), target['end'] + shift)
-            seq, offset = str(ref[lo_i:hi_i]).upper(), lo_i
+            window = str(ref[lo_i:hi_i]).upper()
+            seq, offset = (revcomp(window) if target['strand'] == '-' else window), lo_i
         else:
             seq, offset = target['seq'], target['offset']
         if not seq:
             continue
+        n_seq = len(seq)
 
         candidates, cache = [], {}
 
@@ -310,13 +332,16 @@ def process_single_target(target, refs, dbs, max_hits=1, force_multiprime=False,
                 if not passes_dimer_filters(fwd, rev):
                     continue
                 flags = [f"Rescued{shift:+d}bp"] if shift else []
-                fwd_oligo, rev_oligo = fwd, rev
+                fwd_oligo, rev_oligo = tails[0] + fwd, tails[1] + rev
                 if hairpin_clamp:
                     flags.append("HairpinClamp")
-                    fwd_oligo = add_hairpin_clamp(fwd, fwd, max_clamp_len=HAIRPIN_CLAMP_MAX_LEN)
-                    rev_oligo = add_hairpin_clamp(rev, rev, max_clamp_len=HAIRPIN_CLAMP_MAX_LEN)
-                start = offset + results[f'PRIMER_LEFT_{i}'][0]
+                    fwd_oligo = add_hairpin_clamp(fwd_oligo, fwd, max_clamp_len=HAIRPIN_CLAMP_MAX_LEN)
+                    rev_oligo = add_hairpin_clamp(rev_oligo, rev, max_clamp_len=HAIRPIN_CLAMP_MAX_LEN)
                 size = results[f'PRIMER_PAIR_{i}_PRODUCT_SIZE']
+                q = results[f'PRIMER_LEFT_{i}'][0]   # index on the designed (sense) sequence
+                # Report coordinates on the reference as given; for '-' targets the sense sequence
+                # runs right-to-left along the reference.
+                start = offset + q if target['strand'] == '+' else offset + n_seq - q - size
                 products = [f"{dbname}:{c}:{sz}" for k, (dbname, _) in enumerate(dbs)
                             for c, sz in predict_products(cache[fwd][k][1], cache[rev][k][1], max_product)]
                 candidates.append({
@@ -325,6 +350,7 @@ def process_single_target(target, refs, dbs, max_hits=1, force_multiprime=False,
                     'fwd': fwd, 'rev': rev, 'fwd_oligo': fwd_oligo, 'rev_oligo': rev_oligo,
                     'fwd_tm': results[f'PRIMER_LEFT_{i}_TM'], 'rev_tm': results[f'PRIMER_RIGHT_{i}_TM'],
                     'size': size, 'contig': target['contig'], 'start': start, 'end': start + size,
+                    'strand': target['strand'],
                     'hits': "F:" + "/".join(str(c) for c, _ in cache[fwd]) + " R:" + "/".join(str(c) for c, _ in cache[rev]),
                     'products': ";".join(products),
                     'name': f"{sanitize_name(name)}_amplicon_S{strategy_idx}_{i}",
@@ -371,12 +397,40 @@ def primers_compatible(seq1, seq2, threshold_3p, threshold_full):
     return True, None
 
 
+def priming_footprints(c):
+    """(lo, hi, strand) of the two designed primers on the reference (0-based half-open)."""
+    fl, rl = len(c['fwd']), len(c['rev'])
+    if c.get('strand', '+') == '+':
+        return [(c['start'], c['start'] + fl, '+'), (c['end'] - rl, c['end'], '-')]
+    return [(c['end'] - fl, c['end'], '-'), (c['start'], c['start'] + rl, '+')]
+
+
+def cross_product_size(a, b):
+    """Smallest product two DIFFERENT targets' designed primers could make by pairing across targets
+    (a forward-strand primer of one facing a reverse-strand primer of the other). None if none."""
+    best = None
+    for x in priming_footprints(a):
+        for y in priming_footprints(b):
+            if x[2] == y[2]:
+                continue
+            plus, minus = (x, y) if x[2] == '+' else (y, x)
+            if plus[0] < minus[1]:
+                size = minus[1] - plus[0]
+                best = size if best is None else min(best, size)
+    return best
+
+
 def is_compatible(cand, pool, check_overlap):
-    """Can `cand` join `pool`? Checks amplicon overlap (optional) and all primer cross-dimers."""
-    if check_overlap:
-        for p in pool:
-            if p['contig'] == cand['contig'] and cand['start'] < p['end'] and cand['end'] > p['start']:
-                return False, "amplicon overlap"
+    """Can `cand` join `pool`? Checks amplicon overlap (optional), cross-target products and primer dimers."""
+    for p in pool:
+        if p['contig'] != cand['contig']:
+            continue
+        if check_overlap and cand['start'] < p['end'] and cand['end'] > p['start']:
+            return False, "amplicon overlap"
+        if CFG['max_cross']:
+            size = cross_product_size(cand, p)
+            if size is not None and size <= CFG['max_cross']:
+                return False, f"cross-target product ({size} bp)"
     for p in pool:
         for ps in (p['fwd'], p['rev']):
             for cs in (cand['fwd'], cand['rev']):
@@ -437,7 +491,7 @@ def pack_targets_first_fit(target_to_cands, check_overlap, iterations=20, seed=0
 # Outputs
 # --------------------------------------------------------------------------
 
-CSV_FIELDS = ['pool', 'target_id', 'name', 'flags', 'fwd_oligo', 'rev_oligo', 'fwd_primer', 'rev_primer',
+CSV_FIELDS = ['pool', 'target_id', 'name', 'strand', 'flags', 'fwd_oligo', 'rev_oligo', 'fwd_primer', 'rev_primer',
               'fwd_tm', 'rev_tm', 'amplicon_size', 'contig', 'start', 'end', 'specificity_hits',
               'predicted_products']
 
@@ -447,10 +501,10 @@ def write_outputs(pools, prefix, failed):
     os.makedirs(os.path.dirname(prefix) or '.', exist_ok=True)
     with open(f"{prefix}_order.csv", 'w', newline='') as of:
         order = csv.writer(of)
-        order.writerow(['pool', 'name', 'sequence'])
+        order.writerow(['pool', 'name', 'sequence', 'role'])
         for n, pool in enumerate(pools, 1):
             rows = [{
-                'pool': n, 'target_id': c['target_id'], 'name': c['name'], 'flags': c['flags'],
+                'pool': n, 'target_id': c['target_id'], 'name': c['name'], 'strand': c['strand'], 'flags': c['flags'],
                 'fwd_oligo': c['fwd_oligo'], 'rev_oligo': c['rev_oligo'],
                 'fwd_primer': c['fwd'], 'rev_primer': c['rev'],
                 'fwd_tm': f"{c['fwd_tm']:.2f}", 'rev_tm': f"{c['rev_tm']:.2f}",
@@ -462,14 +516,15 @@ def write_outputs(pools, prefix, failed):
                 w.writerows(rows)
             with open(f"{prefix}_pool_{n}.bed", 'w') as f:
                 for c in pool:
-                    f.write(f"{c['contig']}\t{c['start']}\t{c['end']}\t{c['name']}\t0\t+\n")
-            # Reads begin at the primer; <target>_F / <target>_R names let the pipeline split orientations.
+                    f.write(f"{c['contig']}\t{c['start']}\t{c['end']}\t{c['name']}\t0\t{c['strand']}\n")
+            # Reads begin at the gene-specific primer (tails and any clamp are 5' of it and are not
+            # sequenced), so trimming uses the specific primers only. <target>_F / _R split orientations.
             with open(f"{prefix}_pool_{n}_trimming.fasta", 'w') as f:
                 for c in pool:
-                    f.write(f">{c['target_id']}_F\n{c['fwd_oligo']}\n>{c['target_id']}_R\n{c['rev_oligo']}\n")
+                    f.write(f">{c['target_id']}_F\n{c['fwd']}\n>{c['target_id']}_R\n{c['rev']}\n")
             for c in pool:
-                order.writerow([n, f"{c['name']}_F", c['fwd_oligo']])
-                order.writerow([n, f"{c['name']}_R", c['rev_oligo']])
+                order.writerow([n, f"{c['name']}_F", c['fwd_oligo'], 'forward (sense) primer'])
+                order.writerow([n, f"{c['name']}_R", c['rev_oligo'], 'reverse (antisense) primer; the RT primer for stranded RNA'])
     if failed:
         with open(f"{prefix}_failed_targets.txt", 'w') as f:
             f.write("\n".join(sorted(set(failed))) + "\n")
@@ -479,6 +534,16 @@ def write_outputs(pools, prefix, failed):
 # --------------------------------------------------------------------------
 # Mode 1: design
 # --------------------------------------------------------------------------
+
+def resolve_tails(args):
+    """(forward tail, reverse tail) from the CLI. Default: truncated Illumina P5/P7; --no-tails disables."""
+    if args.no_tails:
+        return ('', '')
+    tails = (args.fwd_tail.upper(), args.rev_tail.upper())
+    if any(set(t) - set('ACGT') for t in tails):
+        raise ValueError("--fwd-tail/--rev-tail must contain only A, C, G, T.")
+    return tails
+
 
 def run_design_mode(args):
     refs = load_references(args.reference)
@@ -495,7 +560,8 @@ def run_design_mode(args):
         (targets.append(t) if t else failed.append(err))
     opts = dict(dbs=dbs, max_hits=args.max_hits, force_multiprime=args.force_multiprime,
                 hairpin_clamp=args.add_hairpin_clamp, rescue=args.rescue,
-                num_candidates=args.num_candidates, max_product=args.max_product)
+                num_candidates=args.num_candidates, max_product=args.max_product,
+                tails=resolve_tails(args))
     with multiprocessing.Pool(os.cpu_count(), initializer=_init_worker,
                               initargs=(dict(CFG), refs, opts)) as pool:
         results = list(tqdm(pool.imap_unordered(_work, targets), total=len(targets), desc="Designing primers"))
@@ -624,6 +690,12 @@ def build_parser():
     g.add_argument('--rescue', action='store_true',
                    help="Shift the window of coordinate-based, unconstrained targets if no pair passes.")
     g.add_argument('--add-hairpin-clamp', action='store_true', help="Prepend a 5' hairpin clamp (experimental).")
+    a = p.add_argument_group('Adapter tails (5\' of each gene-specific primer)')
+    a.add_argument('--fwd-tail', default=P5_TAIL, help="Forward primer tail (default: truncated Illumina P5/Read 1).")
+    a.add_argument('--rev-tail', default=P7_TAIL, help="Reverse primer tail (default: truncated Illumina P7/Read 2).")
+    a.add_argument('--no-tails', action='store_true', help="Order bare gene-specific primers.")
+    g.add_argument('--max-cross-product', type=int, default=CFG['max_cross'],
+                   help="Primers of different targets in one pool must not face each other closer than this (bp; 0 disables).")
     t = p.add_argument_group('Thresholds (kcal/mol)')
     t.add_argument('--max-self-dimer-dg', type=float, default=CFG['self_dimer'])
     t.add_argument('--max-heterodimer-dg', type=float, default=CFG['hetero_dimer'])
@@ -640,7 +712,7 @@ def main():
     args = parser.parse_args()
     configure_logging(args.log_file)
     CFG.update(self_dimer=args.max_self_dimer_dg, hetero_dimer=args.max_heterodimer_dg,
-               end_3p=args.max_end_stability_dg)
+               end_3p=args.max_end_stability_dg, max_cross=args.max_cross_product)
     try:
         if args.feedback:
             run_feedback_mode(args)

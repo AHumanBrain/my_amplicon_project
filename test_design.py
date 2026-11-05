@@ -236,12 +236,102 @@ class TestDesign:
             design.pack_targets_first_fit({n: cand(n) for n in order}, False, 3, seed=1)
         assert seen and all(pop == sorted(pop) for pop in seen)
 
+    def test_cross_target_products_block_a_pool(self, monkeypatch):
+        monkeypatch.setitem(design.CFG, "hetero_dimer", -100.0)   # isolate the product rule from dimer checks
+        monkeypatch.setitem(design.CFG, "end_3p", -100.0)
+        mk = lambda t, s, e, strand="+": {"target_id": t, "contig": "c", "start": s, "end": e, "strand": strand,  # noqa: E731
+                                         "fwd": "GAGACCTACCAGCTCACCTC", "rev": "TCCACGGCAATCTCGATGAT"}
+        a = mk("a", 0, 200)
+        # b is downstream, no overlap: F_a (0) faces R_b (end 700) -> 700 bp product
+        assert design.cross_product_size(a, mk("b", 500, 700)) == 700
+        monkeypatch.setitem(design.CFG, "max_cross", 1000)
+        assert design.is_compatible(mk("b", 500, 700), [a], False)[0] is False
+        assert "700 bp" in design.is_compatible(mk("b", 500, 700), [a], False)[1]
+        monkeypatch.setitem(design.CFG, "max_cross", 600)
+        assert design.is_compatible(mk("b", 500, 700), [a], False)[0] is True
+        monkeypatch.setitem(design.CFG, "max_cross", 0)                # disabled
+        assert design.is_compatible(mk("b", 500, 700), [a], False)[0] is True
+        # a product whose size equals an amplicon length must still be caught (no accidental exclusion)
+        monkeypatch.setitem(design.CFG, "max_cross", 1000)
+        assert design.is_compatible(mk("b", 100, 200), [mk("a", 0, 200)], False)[0] is False
+        # minus-strand targets: roles swap on the reference but the rule is symmetric
+        assert design.cross_product_size(mk("a", 0, 200, "-"), mk("b", 500, 700, "-")) is not None
+        # another contig never interacts
+        other = dict(mk("b", 500, 700), contig="d")
+        assert design.is_compatible(other, [a], False)[0] is True
+
     def test_overlapping_amplicons_go_to_separate_pools(self):
         mk = lambda t, s, e: {"target_id": t, "contig": "c", "start": s, "end": e,  # noqa: E731
                               "fwd": "GAGACCTACCAGCTCACCTC", "rev": "TCCACGGCAATCTCGATGAT"}
         assert design.has_amplicon_overlap([mk("a", 0, 200), mk("b", 150, 350)])
         assert not design.has_amplicon_overlap([mk("a", 0, 200), mk("b", 200, 400)])
         assert design.is_compatible(mk("b", 150, 350), [mk("a", 0, 200)], True) == (False, "amplicon overlap")
+
+
+# ---------------------------------------------------------------- strand and tails
+class TestStrandAndTails:
+    START, END = 1001, 1300                      # 1-based target region on the reference
+
+    def _cands(self, genome, monkeypatch, strand, **extra):
+        fake_blast(monkeypatch)
+        extra = dict(extra, strand=strand, amplicon_min="70", amplicon_max="150")
+        _, cands, err = design_target(genome, "t", self.START, self.END, extra=extra)
+        assert cands, err
+        return cands
+
+    @pytest.mark.parametrize("strand", ["+", "-"])
+    def test_coordinates_match_sequence_on_either_strand(self, genome, monkeypatch, strand):
+        ref = str(genome["chr"].seq).upper()
+        for c in self._cands(genome, monkeypatch, strand):
+            window = ref[c["start"]:c["end"]]
+            sense = window if strand == "+" else design.revcomp(window)
+            assert sense.startswith(c["fwd"]), (strand, c["name"])                       # forward = sense primer
+            assert sense.endswith(design.revcomp(c["rev"])), (strand, c["name"])          # reverse = antisense primer
+            assert c["strand"] == strand and 1000 <= c["start"] and c["end"] <= 1300
+
+    def test_minus_strand_primer_roles_are_swapped_on_the_reference(self, genome, monkeypatch):
+        plus = self._cands(genome, monkeypatch, "+")[0]
+        minus = self._cands(genome, monkeypatch, "-")[0]
+        ref = str(genome["chr"].seq).upper()
+        assert ref[plus["start"]:plus["start"] + len(plus["fwd"])] == plus["fwd"]     # fwd leftmost on '+'
+        end = minus["end"]
+        assert design.revcomp(ref[end - len(minus["fwd"]):end]) == minus["fwd"]       # fwd rightmost on '-'
+
+    def test_minus_strand_constraints_are_in_reference_orientation(self, genome, monkeypatch):
+        # (a primer cannot overlap a 'span' range, so the junction sits outside it)
+        cands = self._cands(genome, monkeypatch, "-", junctions="201", span="140-160", avoid="1-40")
+        a, b = 1000 + 199, 1000 + 200                      # reference indices either side of the join
+        for c in cands:
+            assert c["start"] <= 1000 + 139 and c["end"] >= 1000 + 160                # amplicon contains 140-160
+            f = (c["end"] - len(c["fwd"]), c["end"])                                    # primer footprints on the ref
+            r = (c["start"], c["start"] + len(c["rev"]))
+            assert all(hi <= 1000 or lo >= 1040 for lo, hi in (f, r))                  # nothing in avoided 1-40
+            assert any(lo <= a and hi > b for lo, hi in (f, r)), c["name"]            # a primer spans the join
+
+    def test_bad_strand_rejected(self, genome):
+        t, err = design.resolve_target({"name": "x", "sequence": "ACGT" * 40, "strand": "?"}, genome)
+        assert t is None and "strand" in err
+
+    def test_tails_are_prepended_and_not_in_trimming_file(self, genome, monkeypatch, tmp_path):
+        fake_blast(monkeypatch)
+        t = make_target(genome, "t", 1001, 1300)
+        _, cands, _ = design.process_single_target(t, genome, DBS, num_candidates=5,
+                                                   tails=(design.P5_TAIL, design.P7_TAIL))
+        c = cands[0]
+        assert c["fwd_oligo"] == design.P5_TAIL + c["fwd"] and c["rev_oligo"] == design.P7_TAIL + c["rev"]
+        design.write_outputs([[c]], str(tmp_path / "o"), [])
+        order = list(csv.reader(open(tmp_path / "o_order.csv")))
+        assert order[1][2] == c["fwd_oligo"] and order[2][2] == c["rev_oligo"]
+        fasta = open(tmp_path / "o_pool_1_trimming.fasta").read()
+        assert c["fwd"] in fasta and design.P5_TAIL not in fasta       # reads start at the specific primer
+
+    def test_tail_cli_defaults_and_validation(self):
+        parser = design.build_parser()
+        assert design.resolve_tails(parser.parse_args([])) == ("ACACGACGCTCTTCCGATCT", "GACGTGTGCTCTTCCGATCT")
+        assert design.resolve_tails(parser.parse_args(["--no-tails"])) == ("", "")
+        assert design.resolve_tails(parser.parse_args(["--fwd-tail", "acgt", "--rev-tail", "ttgg"])) == ("ACGT", "TTGG")
+        with pytest.raises(ValueError):
+            design.resolve_tails(parser.parse_args(["--fwd-tail", "ACGN"]))
 
 
 # ---------------------------------------------------------------- outputs
@@ -257,7 +347,8 @@ class TestOutputs:
         rows = list(csv.DictReader(open(f"{prefix}_pool_1.csv")))
         assert rows[0]["pool"] == "1" and rows[0]["fwd_oligo"] == rows[0]["fwd_primer"]
         order = list(csv.reader(open(f"{prefix}_order.csv")))
-        assert order[0] == ["pool", "name", "sequence"] and len(order) == 1 + 2 * n_targets
+        assert order[0] == ["pool", "name", "sequence", "role"] and len(order) == 1 + 2 * n_targets
+        assert order[1][3].startswith("forward") and "RT primer" in order[2][3]
         fasta = open(f"{prefix}_pool_1_trimming.fasta").read()
         assert fasta.startswith(f">{rows[0]['target_id']}_F\n{rows[0]['fwd_oligo']}\n")
         bed = open(f"{prefix}_pool_1.bed").read().split("\t")
