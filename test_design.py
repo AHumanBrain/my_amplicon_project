@@ -686,6 +686,78 @@ class TestUniquenessScreen:
         assert design.screen_targets([t], [genome], "on", 1, rescue=True)[2] is False
 
 
+class TestPrimerLimits:
+    @pytest.fixture(autouse=True)
+    def restore_cfg(self):
+        saved = {k: design.CFG[k] for k in ("size", "gc", "tm")}
+        yield
+        design.CFG.update(saved)
+
+    @staticmethod
+    def _captured(monkeypatch):
+        seen = {}
+        monkeypatch.setattr(design.primer3, "design_primers", lambda seq_args, g: seen.update(g) or {})
+        design.design_primers_for_sequence("ACGT" * 100, "t")
+        return seen
+
+    def test_defaults_are_the_values_the_designer_always_used(self, monkeypatch):
+        g = self._captured(monkeypatch)
+        assert (g["PRIMER_MIN_SIZE"], g["PRIMER_OPT_SIZE"], g["PRIMER_MAX_SIZE"]) == (19, 20, 21)
+        assert (g["PRIMER_MIN_GC"], g["PRIMER_MAX_GC"], g["PRIMER_OPT_TM"]) == (40.0, 60.0, 60.0)
+        assert (g["PRIMER_MIN_TM"], g["PRIMER_MAX_TM"]) == (59.0, 61.0)
+        assert design.strategies(150, 250) == [
+            (0, (150, 250), (59.0, 61.0)), (1, (250, 350), (57.0, 63.0)),
+            (2, (100, 150), (57.0, 63.0)), (3, (150, 250), (55.0, 65.0))]
+
+    def test_custom_limits_reach_primer3_and_the_fallback_strategies(self, monkeypatch):
+        design.CFG.update(size=(22, 30), gc=(30.0, 60.0), tm=(60.0, 64.0))
+        g = self._captured(monkeypatch)
+        assert (g["PRIMER_MIN_SIZE"], g["PRIMER_OPT_SIZE"], g["PRIMER_MAX_SIZE"]) == (22, 26, 30)
+        assert (g["PRIMER_MIN_GC"], g["PRIMER_OPT_TM"]) == (30.0, 62.0)
+        assert [s[2] for s in design.strategies(150, 250)] == [(60.0, 64.0), (58.0, 66.0), (58.0, 66.0), (56.0, 68.0)]
+
+    def test_longer_primers_are_designed_on_an_at_rich_template(self):
+        rnd = random.Random(11)
+        seq = "".join(rnd.choice("AATTACGT") for _ in range(500))
+        design.CFG.update(size=(22, 30), gc=(25.0, 60.0), tm=(58.0, 64.0))
+        res = design.design_primers_for_sequence(seq, "at_rich", 5, (150, 250), (58.0, 64.0))
+        n = res["PRIMER_PAIR_NUM_RETURNED"]
+        assert n > 0
+        for i in range(n):
+            for side in ("LEFT", "RIGHT"):
+                assert 22 <= len(res[f"PRIMER_{side}_{i}_SEQUENCE"]) <= 30
+
+    def test_validation(self):
+        ns = lambda **kw: argparse.Namespace(**{**dict(primer_min_size=19, primer_max_size=21, primer_min_gc=40.0,  # noqa: E731
+                                                       primer_max_gc=60.0, primer_min_tm=59.0, primer_max_tm=61.0), **kw})
+        assert design.set_primer_limits(ns()) == {"size": (19, 21), "gc": (40.0, 60.0), "tm": (59.0, 61.0)}
+        for bad, match in ((dict(primer_min_size=22, primer_max_size=21), "size"), (dict(primer_max_size=40), "size"),
+                           (dict(primer_min_gc=70.0), "GC"), (dict(primer_min_tm=62.0), "Tm")):
+            with pytest.raises(ValueError, match=match):
+                design.set_primer_limits(ns(**bad))
+
+    def test_project_file_section_and_cli_flags(self, tmp_path):
+        proj = tmp_path / "p.toml"
+        proj.write_text('[primers]\nmin_size = 22\nmax_size = 30\nmin_gc = 30.0\nmin_tm = 57.0\nmax_tm = 64.0\n')
+        _, args = design.parse_args(["--project", str(proj), "--primer-max-size", "28"])
+        assert (args.primer_min_size, args.primer_max_size, args.primer_min_gc, args.primer_min_tm) == (22, 28, 30.0, 57.0)
+        _, defaults = design.parse_args([])
+        assert (defaults.primer_min_size, defaults.primer_max_size) == (19, 21)
+
+    def test_screen_kmer_length_follows_the_primer_minimum(self, tmp_path, monkeypatch):
+        seen = []
+        real = design.uniqueness.genome_copy_counts
+        monkeypatch.setattr(design.uniqueness, "genome_copy_counts", lambda fa, seqs, k: seen.append(k) or real(fa, seqs, k))
+        genome, unique, rep, _ = TestUniquenessScreen._genome(tmp_path)
+        targets = TestUniquenessScreen()._targets(genome, unique, rep)
+        design.screen_targets(targets, [genome], "on", 1)
+        design.CFG.update(size=(17, 21))
+        design.screen_targets(targets, [genome], "on", 1)
+        design.CFG.update(size=(24, 30))
+        design.screen_targets(targets, [genome], "on", 1)
+        assert seen == [19, 17, 19]
+
+
 class TestSimulatorAndFixture:
     def test_simulator_deterministic_and_writes_truth(self, tmp_path):
         import generate_simulated_fastq as sim

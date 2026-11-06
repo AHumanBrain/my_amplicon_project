@@ -40,9 +40,11 @@ CFG = {
     'hetero_dimer': BioConfig.MAX_HETERODIMER_DG,
     'end_3p': BioConfig.END_STABILITY_DG_THRESHOLD,
     'max_cross': 1000,   # bp; facing primers of different targets in one pool must be farther apart
+    # primer3 limits (--primer-min-size etc.); the defaults are the values the designer always used
+    'size': (19, 21), 'gc': (40.0, 60.0), 'tm': (BioConfig.IDEAL_TM_MIN, BioConfig.IDEAL_TM_MAX),
 }
 RESCUE_SHIFTS = [0, -25, 25, -45, 45]  # bp window shifts tried with --rescue
-SCREEN_K = 19                    # = PRIMER_MIN_SIZE: a primer containing a genome-unique 19-mer is itself unique
+SCREEN_K = 19                    # screen k-mer length = min(this, --primer-min-size): a primer containing a genome-unique k-mer is itself unique
 SCREEN_AUTO_MAX_BYTES = 500_000_000   # --uniqueness-screen auto: only for references up to ~500 Mb (a pass takes seconds)
 # Truncated Illumina tails: the 3' 20 nt of the TruSeq Read 1 / Read 2 sequencing-primer sites.
 # A later index PCR completes the adapters. Reads therefore start at the gene-specific primer.
@@ -248,12 +250,13 @@ def predict_products(fwd_locs, rev_locs, max_product=2000):
 # --------------------------------------------------------------------------
 
 def strategies(lo, hi):
-    """(index, product_size_range, (tm_min, tm_max)). Strategy 0 first, the rest are fallbacks."""
+    """(index, product_size_range, (tm_min, tm_max)). Strategy 0 first, the rest are fallbacks (Tm window widened by 2 then 4 C)."""
+    tm_lo, tm_hi = CFG['tm']
     return [
-        (0, (lo, hi), (BioConfig.IDEAL_TM_MIN, BioConfig.IDEAL_TM_MAX)),
-        (1, (hi, hi + 100), (57.0, 63.0)),
-        (2, (max(40, lo - 50), lo), (57.0, 63.0)),
-        (3, (lo, hi), (55.0, 65.0)),
+        (0, (lo, hi), (tm_lo, tm_hi)),
+        (1, (hi, hi + 100), (tm_lo - 2.0, tm_hi + 2.0)),
+        (2, (max(40, lo - 50), lo), (tm_lo - 2.0, tm_hi + 2.0)),
+        (3, (lo, hi), (tm_lo - 4.0, tm_hi + 4.0)),
     ]
 
 
@@ -267,10 +270,12 @@ def design_primers_for_sequence(sequence, name, num_candidates=25, amp_range=(15
         seq_args['SEQUENCE_TARGET'] = [list(s) for s in span]  # the amplicon must contain one
     if avoid:
         seq_args['SEQUENCE_EXCLUDED_REGION'] = [list(s) for s in avoid]  # no primer may overlap
+    (size_lo, size_hi), (gc_lo, gc_hi), (opt_tm_lo, opt_tm_hi) = CFG['size'], CFG['gc'], CFG['tm']
     global_args = {
-        'PRIMER_OPT_SIZE': 20, 'PRIMER_MIN_SIZE': 19, 'PRIMER_MAX_SIZE': 21, 'PRIMER_OPT_TM': 60.0,
+        'PRIMER_OPT_SIZE': round((size_lo + size_hi) / 2), 'PRIMER_MIN_SIZE': size_lo, 'PRIMER_MAX_SIZE': size_hi,
+        'PRIMER_OPT_TM': (opt_tm_lo + opt_tm_hi) / 2,
         'PRIMER_MIN_TM': tm_range[0], 'PRIMER_MAX_TM': tm_range[1],
-        'PRIMER_MIN_GC': 40.0, 'PRIMER_MAX_GC': 60.0,
+        'PRIMER_MIN_GC': gc_lo, 'PRIMER_MAX_GC': gc_hi,
         'PRIMER_PRODUCT_SIZE_RANGE': [list(amp_range)],
         'PRIMER_NUM_RETURN': num_candidates,
         # KAPA HiFi buffer: 2.5 mM Mg++, 1.2 mM total dNTP, SantaLucia 1998 salt correction
@@ -654,7 +659,7 @@ def resolve_tails(args):
 def screen_targets(targets, fastas, mode, max_hits, rescue=False, force_multiprime=False):
     """Fail repeat regions early: drop targets in which no pair of genome-unique primer sites fits the amplicon range.
 
-    Counts how often each 19-mer of a target occurs in each specificity FASTA (both strands). A site is usable if it
+    Counts how often each k-mer (k = 19, or the primer minimum size if smaller) of a target occurs in each specificity FASTA (both strands). A site is usable if it
     occurs <= max_hits times in EVERY FASTA (the same rule BLAST screening applies). Conservative: a region is only
     rejected when no unique site pair can exist, so it never rejects what the full search would accept (0 of 79
     designed regions rejected on GRCh38). Skipped for rescue-eligible targets and with --force-multiprime.
@@ -662,6 +667,7 @@ def screen_targets(targets, fastas, mode, max_hits, rescue=False, force_multipri
     """
     if mode not in ('auto', 'on', 'off'):
         raise ValueError(f"uniqueness_screen must be auto, on or off (got '{mode}')")
+    k = min(SCREEN_K, CFG['size'][0])
     size = sum(os.path.getsize(f) for f in fastas)
     if mode == 'off' or force_multiprime or (mode == 'auto' and size > SCREEN_AUTO_MAX_BYTES):
         return targets, [], False
@@ -669,19 +675,19 @@ def screen_targets(targets, fastas, mode, max_hits, rescue=False, force_multipri
     checked = [t for t in targets if not (rescue and t['coordinate_based'] and not constrained(t))]
     if not checked:
         return targets, [], False
-    log.info("Uniqueness screen: counting %d-mers of %d target(s) in %d FASTA(s) (%.0f Mb)...", SCREEN_K, len(checked),
+    log.info("Uniqueness screen: counting %d-mers of %d target(s) in %d FASTA(s) (%.0f Mb)...", k, len(checked),
              len(fastas), size / 1e6)
-    per_fasta = [uniqueness.genome_copy_counts(fa, [t['seq'] for t in checked], SCREEN_K) for fa in fastas]
+    per_fasta = [uniqueness.genome_copy_counts(fa, [t['seq'] for t in checked], k) for fa in fastas]
     rejected = {}
     for i, t in enumerate(checked):
         limit = t['max_hits'] if t['max_hits'] is not None else max_hits
         lo, hi = t['amp_range']
-        if all(uniqueness.has_primer_pair_site(counts[i], SCREEN_K, lo, hi, limit) for counts in per_fasta):
+        if all(uniqueness.has_primer_pair_site(counts[i], k, lo, hi, limit) for counts in per_fasta):
             continue
         worst = min(per_fasta, key=lambda counts: ((counts[i] >= 0) & (counts[i] <= limit)).mean())
         valid = worst[i] >= 0
         pct = 100.0 * ((worst[i] <= limit) & valid).sum() / max(valid.sum(), 1)
-        rejected[t['name']] = (f"{t['name']}: repeat region. Only {pct:.0f}% of its {SCREEN_K}-mers occur <= {limit} time(s) "
+        rejected[t['name']] = (f"{t['name']}: repeat region. Only {pct:.0f}% of its {k}-mers occur <= {limit} time(s) "
                                f"in the genome, and no pair of unique primer sites fits a {lo}-{hi} bp amplicon "
                                f"(skip this check with --uniqueness-screen off).")
     return [t for t in targets if t['name'] not in rejected], list(rejected.values()), True
@@ -850,6 +856,9 @@ PROJECT_SCHEMA = {
                'force_single_pool': ('force_single_pool', 'bool'), 'force_multiprime': ('force_multiprime', 'bool'),
                'uniqueness_screen': ('uniqueness_screen', 'str')},
     'tails': {'forward': ('fwd_tail', 'str'), 'reverse': ('rev_tail', 'str'), 'enabled': ('no_tails', 'not')},
+    'primers': {'min_size': ('primer_min_size', 'int'), 'max_size': ('primer_max_size', 'int'),
+                'min_gc': ('primer_min_gc', 'float'), 'max_gc': ('primer_max_gc', 'float'),
+                'min_tm': ('primer_min_tm', 'float'), 'max_tm': ('primer_max_tm', 'float')},
     'thresholds': {'self_dimer_dg': ('max_self_dimer_dg', 'float'), 'heterodimer_dg': ('max_heterodimer_dg', 'float'),
                    'end_stability_dg': ('max_end_stability_dg', 'float')},
 }
@@ -939,7 +948,8 @@ def build_manifest(args, layout, pools, failed, n_requested, gaps=()):
             'layout', 'max_pools', 'max_hits', 'amplicon_min', 'amplicon_max', 'max_product', 'max_cross_product',
             'num_candidates', 'monte_carlo_iters', 'seed', 'rescue', 'force_sparse', 'force_single_pool',
             'force_multiprime', 'uniqueness_screen', 'fwd_tail', 'rev_tail', 'no_tails', 'max_self_dimer_dg', 'max_heterodimer_dg',
-            'max_end_stability_dg')},
+            'max_end_stability_dg', 'primer_min_size', 'primer_max_size', 'primer_min_gc', 'primer_max_gc',
+            'primer_min_tm', 'primer_max_tm')},
         'inputs': {'targets': _file_info(args.targets), 'reference': [_file_info(f) for f in args.reference],
                    'specificity_fasta': [_file_info(f) for f in (args.specificity_fasta or args.reference)]},
         'results': {'targets_requested': n_requested, 'targets_designed': sum(len(p) for p in pools),
@@ -990,6 +1000,14 @@ def build_parser():
                         "auto: on for references up to ~500 Mb, off for larger genomes (a human-size pass takes minutes).")
     g.add_argument('--rescue', action='store_true',
                    help="Shift the window of coordinate-based, unconstrained targets if no pair passes.")
+    q = p.add_argument_group('Primer limits (primer3)')
+    q.add_argument('--primer-min-size', type=int, default=CFG['size'][0], help="Minimum primer length (nt).")
+    q.add_argument('--primer-max-size', type=int, default=CFG['size'][1], help="Maximum primer length (nt, primer3 allows up to 36).")
+    q.add_argument('--primer-min-gc', type=float, default=CFG['gc'][0], help="Minimum primer GC %%. Lower it for AT-rich templates.")
+    q.add_argument('--primer-max-gc', type=float, default=CFG['gc'][1], help="Maximum primer GC %%.")
+    q.add_argument('--primer-min-tm', type=float, default=CFG['tm'][0],
+                   help="Preferred minimum Tm (C, KAPA conditions); fallback strategies widen the window by 2 then 4 C.")
+    q.add_argument('--primer-max-tm', type=float, default=CFG['tm'][1], help="Preferred maximum Tm (C).")
     a = p.add_argument_group('Adapter tails (5\' of each gene-specific primer)')
     a.add_argument('--fwd-tail', default=P5_TAIL, help="Forward primer tail (default: truncated Illumina P5/Read 1).")
     a.add_argument('--rev-tail', default=P7_TAIL, help="Reverse primer tail (default: truncated Illumina P7/Read 2).")
@@ -1012,6 +1030,19 @@ def build_parser():
     return p
 
 
+def set_primer_limits(args):
+    """Validate the primer limits and return the CFG entries for them."""
+    size, gc, tm = (args.primer_min_size, args.primer_max_size), (args.primer_min_gc, args.primer_max_gc), \
+                   (args.primer_min_tm, args.primer_max_tm)
+    if not 15 <= size[0] <= size[1] <= 36:
+        raise ValueError(f"primer size must satisfy 15 <= min <= max <= 36 (got {size[0]}-{size[1]}).")
+    if not 0 <= gc[0] <= gc[1] <= 100:
+        raise ValueError(f"primer GC must satisfy 0 <= min <= max <= 100 (got {gc[0]}-{gc[1]}).")
+    if not 30 <= tm[0] < tm[1] <= 90:
+        raise ValueError(f"primer Tm must satisfy 30 <= min < max <= 90 (got {tm[0]}-{tm[1]}).")
+    return {'size': size, 'gc': gc, 'tm': tm}
+
+
 def parse_args(argv=None):
     """Parse the CLI; --project supplies defaults that explicit options override."""
     parser = build_parser()
@@ -1029,6 +1060,10 @@ def main():
     configure_logging(args.log_file)
     CFG.update(self_dimer=args.max_self_dimer_dg, hetero_dimer=args.max_heterodimer_dg,
                end_3p=args.max_end_stability_dg)
+    try:
+        CFG.update(set_primer_limits(args))
+    except ValueError as e:
+        sys.exit(f"error: {e}")
     try:
         if args.feedback:
             run_feedback_mode(args)
