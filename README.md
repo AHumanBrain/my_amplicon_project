@@ -2,7 +2,17 @@
 
 [![CI](https://github.com/AHumanBrain/my_amplicon_project/actions/workflows/ci.yml/badge.svg)](https://github.com/AHumanBrain/my_amplicon_project/actions/workflows/ci.yml)
 
-A vendor-agnostic design tool for **custom-panel multiplex PCR** on DNA or RNA targets. You decide what to target; the tool designs and screens primers, packs them into pools, and analyses the sequencing so coverage feeds back into pool rebalancing. Primers are ordinary oligos with truncated Illumina tails (P5 forward, P7 reverse), orderable from any vendor. **Everything is in silico** (nothing wet-lab validated; the analysis has been run on one real public dataset).
+## Summary
+
+**What it is.** A vendor-agnostic design tool for custom-panel multiplex PCR on DNA or RNA targets you choose. It designs and screens primers, splits them into pools, and writes an order sheet that a human reviews before anything is ordered (the tool never orders). After sequencing, it measures per-amplicon coverage and writes a rebalancing recipe. Primers are ordinary oligos with truncated Illumina tails (P5 forward, P7 reverse), orderable from any vendor.
+
+**Approach.** Candidates come from primer3 under KAPA HiFi conditions and are screened for exact genomic hits (BLAST), repeat regions, and primer-dimers and unwanted products inside each pool. Three layouts: *sparse* (scattered targets, fewest pools), *tiled* (fixed overlapping windows, two pools) and *chain* (cover a region end to end with guaranteed overlap, two alternating pools).
+
+**Result.** On SARS-CoV-2 (29,903 bp) the chain layout designs 114 amplicons in two pools that cover 99.5% of the genome after primer trimming, against 99.6% for the published ARTIC v3 scheme (predicted from the design alone). The analysis was run on a real public ARTIC dataset: 80% of read pairs kept, all 98 amplicons covered, fold-80 of 5.6.
+
+**Limits.** Everything is in silico. Designs are checked for coverage and compatibility, not yield: our thermodynamic metrics did not predict which real amplicons were weak (|rho| <= 0.19). Real reads were run for one viral dataset only, nothing human. Targets must be unique in the genome; repeat regions fail by design.
+
+*The rest of this README gives the details, figures and the full verification table.*
 
 ```mermaid
 %%{init: {"theme":"base","themeVariables":{"fontFamily":"Inter, system-ui, -apple-system, Segoe UI, sans-serif","fontSize":"15px","background":"#fcfcfb","primaryColor":"#cde2fb","primaryBorderColor":"#2a78d6","primaryTextColor":"#0b0b0b","secondaryColor":"#d3f1e5","tertiaryColor":"#fde1d6","lineColor":"#52514e","textColor":"#0b0b0b","clusterBkg":"#fcfcfb","clusterBorder":"#e4e3df","edgeLabelBackground":"#fcfcfb"},"flowchart":{"curve":"basis","nodeSpacing":30,"rankSpacing":42,"padding":12}}}%%
