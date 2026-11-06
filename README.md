@@ -43,7 +43,7 @@ micromamba activate amplicon_pipeline
 
 python design.py --project panel.example.toml                    # SARS-CoV-2, 99 tiles, ~2.5 min -> 2 pools
 python design.py --project panel.example.toml --layout chain \
-    --targets design/targets/sars2_region.tsv                    # whole genome, chained: a few minutes
+    --targets design/targets/sars2_region.tsv                    # whole genome, chained: several minutes (5-6 measured)
 python scripts/design_viewer.py --prefix design/output/sars2_demo \
     --reference examples/sars2/NC_045512.2.fa --outdir panel_view # open panel_view/specificity.html
 
