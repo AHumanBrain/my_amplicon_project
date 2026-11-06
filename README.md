@@ -162,11 +162,21 @@ flowchart LR
 
 `analysis/analyze.py` needs only `cutadapt`, `bwa`, `samtools`, `numpy` and `matplotlib`. One run per pool; `{1,2}` in `--reads` marks the read number. Reads begin at the primer, so primers are matched anchored at the 5′ end (R1 forward, R2 reverse, which is what the tailed P5/P7 primers give) and unmatched reads are discarded; if none match, the run stops with an error. If your library starts reads at either end of the amplicon (ligation or tagmentation preps), add `--either-orientation`; on the real ARTIC run below the default kept 40% of pairs and this flag 80%.
 
-Metrics: mean target coverage, on-target base %, fold-80 (mean ÷ 20th percentile of target-base depth; n/a when that percentile is 0), and % of amplicons above 0.2× the mean. On a 21-amplicon panel these reproduce the earlier Picard-based pipeline exactly, in 6 seconds instead of 1½ minutes. Output per sample in `<outdir>/<sample>/`: sorted BAM, `target_coverage.tsv`, `<sample>_balancing_feedback.json`, `_target_summary.tsv`, `_uniformity.png`, `_summary.json` (metrics plus provenance).
+Metrics: mean target coverage, on-target base %, fold-80 (mean ÷ 20th percentile of target-base depth; n/a when that percentile is 0), and % of amplicons above 0.2× the mean. On a 21-amplicon panel these reproduce the earlier Picard-based pipeline exactly, in 6 seconds instead of 1½ minutes. Output per sample in `<outdir>/<sample>/`: sorted BAM, `target_coverage.tsv`, `<sample>_balancing_feedback.json`, `_target_summary.tsv`, `_uniformity.png`, `_coverage_track.png`, `_summary.json` (metrics plus provenance).
 
-![Per-amplicon coverage on the real ARTIC v3 run](docs/artic_uniformity.png)
+Two plots are written per sample: normalized coverage per amplicon (`_uniformity.png`) and coverage along the genome with the amplicon layout underneath (`_coverage_track.png`).
 
-*The tool's own uniformity plot on a real MiSeq ARTIC v3 run (98 amplicons): fold-80 5.6 (simulated reads give 1.3); red points fall below 0.2× the mean.*
+**Real reads** (public MiSeq ARTIC v3 run, 98 amplicons; fold-80 5.6, 91.8% of amplicons above 0.2× the mean):
+
+![Normalized coverage per amplicon, real ARTIC v3 run](docs/artic_real_uniformity.png)
+
+![Coverage along the genome, real ARTIC v3 run](docs/artic_real_coverage.png)
+
+**Simulated reads for this tool's `--layout chain` design** (both pools together, 114 amplicons; fold-80 3.3). This is **simulated, not a prediction of yield**: the spread between amplicons is drawn from a log-normal calibrated to the real run's spread (`generate_simulated_fastq.py --lognormal-sigma 0.87`), so the plots show what the analysis looks like on a design of this size, and the two small internal gaps the design reports (about 13,070 and 23,100) show as dips:
+
+![Normalized coverage per amplicon, simulated chain design](docs/chain_sim_uniformity.png)
+
+![Coverage along the genome, simulated chain design](docs/chain_sim_coverage.png)
 
 There is no variant calling. Amplicon reads share start positions, so over 99% of pairs look like duplicates: do not run duplicate-aware tools or filters on the BAM.
 
@@ -210,7 +220,7 @@ Real BLAST+, bwa, samtools and cutadapt. `bash scripts/check_all.sh` runs everyt
 | Human GRCh38 primary assembly, 100 random 400 bp regions (**not a panel**) | 79 designed in 3 pools, 18 min; the 21 failed regions are high-copy repeats (median about 26,000 genomic matches vs 1). The repeat screen alone took 6.4 min on this genome and caught 12 of the 21 |
 | RNA junction example | junction-spanning pair: no genomic product; unconstrained pair: same-size genomic product |
 | Analysis on an earlier 21-amplicon panel | 6 s; 6,299 of 6,300 pairs kept; identical to the previous Picard-based pipeline |
-| Unit tests | 89 (87 plus two end-to-end tests that skip without bwa/samtools) |
+| Unit tests | 92 (90 plus two end-to-end tests that skip without bwa/samtools) |
 
 ## Limits and open items
 
@@ -255,7 +265,7 @@ Brute-force screening alone places roughly 145 targets per pool under the plain 
 ```
 design.py                    design, packing, feedback, project file, manifest
 core/                        biophysics.py (primer3, KAPA conditions) · chain.py (chain solver) · uniqueness.py (repeat screen)
-analysis/                    analyze.py, metrics.py, balance.py, plot_uniformity.py, simulator
+analysis/                    analyze.py, metrics.py, balance.py, plot_uniformity.py, plot_coverage.py, simulator
 scripts/                     design_viewer.py, check_all.sh, real_data_check.sh, make_ecoli_targets.py, ...
 examples/sars2/              SARS-CoV-2 reference + ARTIC v3 scheme (the development genome)
 design/targets/              sars2_* and ecoli_* target sets      common_refs/   E. coli K-12 genome + GFF (scale tests)

@@ -572,7 +572,8 @@ class TestAnalysis:
         assert {"cutadapt", "samtools", "bwa", "python"} <= set(prov["tool_versions"]) and "unknown" not in prov["tool_versions"].values()
         assert all(prov["inputs"][k]["sha256"] for k in ("genome", "bed", "primers")) and len(prov["reads"]) == 2
         for f in ("FixtureSample.sorted.bam", "FixtureSample_balancing_feedback.json", "FixtureSample_target_summary.tsv",
-                  "FixtureSample_uniformity.png", "target_coverage.tsv", "cutadapt.log", "FixtureSample_summary.json"):
+                  "FixtureSample_uniformity.png", "FixtureSample_coverage_track.png", "target_coverage.tsv", "cutadapt.log",
+                  "FixtureSample_summary.json"):
             assert os.path.exists(os.path.join(tmp_path, "res", "FixtureSample", f)), f
         fb = json.load(open(tmp_path / "res/FixtureSample/FixtureSample_balancing_feedback.json"))
         assert len(fb["target_recommendations"]) == 3
@@ -812,6 +813,38 @@ class TestChain:
         placed, gaps = chain.chain_region(cands, 0, 2000, [[], []],
                                           lambda c, m: (c["start"], c["end"]) not in banned and self.no_overlap(c, m))
         assert not any((c["start"], c["end"]) in banned for c in placed)
+
+
+class TestPlotsAndSpread:
+    def test_uniformity_and_coverage_track_write_images(self, tmp_path):
+        import numpy as np
+        import plot_coverage
+        import plot_uniformity
+        targets = [{"name": f"t{i}", "chrom": "c", "start": i * 300, "end": i * 300 + 380, "rel_mean": r}
+                   for i, r in enumerate([0.05, 0.9, 1.1, 1.6, 0.3, 2.5])]
+        assert plot_uniformity.plot_uniformity(targets, str(tmp_path / "u.png"), "s")
+        assert not plot_uniformity.plot_uniformity([{"rel_mean": 0.0}], str(tmp_path / "none.png"), "s")
+        pos = np.arange(1, 1500)
+        depth = np.where(pos % 300 < 20, 0, 50 + pos % 97)
+        assert plot_coverage.plot_coverage_track((np.array(["c"] * len(pos)), pos, depth), targets, str(tmp_path / "c.png"), "s")
+        assert not plot_coverage.plot_coverage_track((np.array(["c"]), np.array([1]), np.array([0])), targets,
+                                                     str(tmp_path / "z.png"), "s")
+        assert (tmp_path / "u.png").stat().st_size > 5000 and (tmp_path / "c.png").stat().st_size > 5000
+
+    def test_depth_profile_parses_samtools_depth(self):
+        import metrics
+        contigs, pos, depth = metrics.depth_profile("c1\t10\t5\nc1\t11\t0\nc2\t3\t7\n")
+        assert list(contigs) == ["c1", "c1", "c2"] and list(pos) == [10, 11, 3] and list(depth) == [5, 0, 7]
+
+    def test_lognormal_spread_has_the_requested_mean_and_is_reproducible(self):
+        import math
+        import generate_simulated_fastq as sim
+        draws = [sim.pairs_for_amplicon(1000, random.Random(i), False, sigma=0.8) for i in range(4000)]
+        assert abs(sum(draws) / len(draws) - 1000) < 60                      # mean-preserving weights
+        logs = [math.log(d / 1000) for d in draws]
+        assert 0.7 < (sum((x - sum(logs) / len(logs)) ** 2 for x in logs) / len(logs)) ** 0.5 < 0.9
+        assert sim.pairs_for_amplicon(100, random.Random(3), False, sigma=0.8) == sim.pairs_for_amplicon(100, random.Random(3), False, sigma=0.8)
+        assert sim.pairs_for_amplicon(100, random.Random(3), False) == 100
 
 
 class TestSimulatorAndFixture:

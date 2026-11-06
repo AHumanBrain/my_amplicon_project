@@ -24,6 +24,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import balance  # noqa: E402
 import metrics  # noqa: E402
+import plot_coverage  # noqa: E402
 import plot_uniformity  # noqa: E402
 
 TOOLS = ("cutadapt", "bwa", "samtools")
@@ -184,7 +185,7 @@ def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, 
         raise RuntimeError(f"{sample}: no reads started with a primer from the primer FASTA (all discarded). "
                            "Check that --primers belongs to this pool and that reads begin at the primer.")
     bam = align(sample, trimmed, genome_index, sdir, threads)
-    targets, depths, stats = metrics.measure(bam, bed)
+    targets, depths, stats, profile = metrics.measure(bam, bed, profile=True)
     panel = metrics.panel_metrics(targets, depths, stats)
     feedback = balance.build_feedback(panel, targets)
 
@@ -202,6 +203,7 @@ def analyze_sample(sample, reads, genome_index, bed, fwd, rev, outdir, threads, 
             w.writerow([r["target_id"], f"{r['mean_coverage']:.1f}", f"{r['rel_mean']:.3f}",
                         f"{r['recommended_adjustment']:.2f}", r["action"]])
     plotted = plot_uniformity.plot_uniformity(targets, os.path.join(sdir, f"{sample}_uniformity.png"), sample)
+    plot_coverage.plot_coverage_track(profile, targets, os.path.join(sdir, f"{sample}_coverage_track.png"), sample)
     summary = {"sample": sample, **trim_stats, **panel, "uniformity_0.2x": feedback["overall_metrics"]["uniformity_0.2x"],
                "uniformity_plot": plotted,
                "provenance": {**(provenance or {}), "reads": [file_info(r) for r in reads]}}

@@ -50,13 +50,16 @@ def add_errors(read, rng, error_rate):
     return "".join(out)
 
 
-def pairs_for_amplicon(coverage, rng, non_uniform):
-    """Read pairs for one amplicon; --non-uniform scales coverage by U(0.1, 2.0)."""
+def pairs_for_amplicon(coverage, rng, non_uniform, sigma=None):
+    """Read pairs for one amplicon. --non-uniform scales coverage by U(0.1, 2.0); --lognormal-sigma S scales it by a
+    log-normal weight with mean 1 (ln-spread S), the shape real amplicon panels show."""
+    if sigma:
+        return max(1, int(coverage * rng.lognormvariate(-sigma * sigma / 2, sigma)))
     return int(coverage * rng.uniform(0.1, 2.0)) if non_uniform else coverage
 
 
 def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_prefix,
-                           non_uniform=False, seed=0,
+                           non_uniform=False, seed=0, sigma=None,
                            mutation_rate=0.01, error_rate=0.001):
     rng = random.Random(seed)
     qual = "I" * read_len
@@ -76,7 +79,7 @@ def generate_fastq_records(intervals, genome_dict, coverage, read_len, output_pr
                 continue
             amplicon, muts = mutate_sequence(ref_seq, rng, mutation_rate)
             truth.extend((chrom, start + pos + 1, ref, alt, name) for pos, ref, alt in muts)
-            n_pairs = pairs_for_amplicon(coverage, rng, non_uniform)
+            n_pairs = pairs_for_amplicon(coverage, rng, non_uniform, sigma)
             print(f"   -> {n_pairs} pairs for {name} ({len(muts)} SNVs)")
 
             for _ in range(n_pairs):
@@ -107,6 +110,7 @@ def main():
     parser.add_argument("--coverage", type=int, default=100, help="Read pairs per amplicon")
     parser.add_argument("--read-length", type=int, default=150)
     parser.add_argument("--non-uniform", action="store_true")
+    parser.add_argument("--lognormal-sigma", type=float, help="per-amplicon coverage spread: log-normal weights with this ln-sigma (overrides --non-uniform)")
     parser.add_argument("--mutation-rate", type=float, default=0.01, help="Per-base SNV rate per amplicon")
     parser.add_argument("--error-rate", type=float, default=0.001, help="Per-base sequencing error rate")
     parser.add_argument("--seed", type=int, default=0)
@@ -115,7 +119,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     generate_fastq_records(parse_bed(args.bed), load_genome(args.genome), args.coverage,
                            args.read_length, os.path.join(args.output_dir, args.sample_name),
-                           non_uniform=args.non_uniform,
+                           non_uniform=args.non_uniform, sigma=args.lognormal_sigma,
                            seed=args.seed, mutation_rate=args.mutation_rate,
                            error_rate=args.error_rate)
     print("Simulation complete.")

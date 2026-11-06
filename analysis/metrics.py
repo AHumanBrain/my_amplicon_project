@@ -70,8 +70,16 @@ def panel_metrics(targets, depths, stats):
     }
 
 
-def measure(bam, bed):
-    """Run samtools on `bam` for the amplicons in `bed`; returns (targets, depths, stats)."""
+def depth_profile(text):
+    """`samtools depth -a -b bed` output -> (contigs, positions (1-based), depths) as numpy arrays."""
+    rows = [line.split("\t") for line in text.splitlines() if line]
+    return (np.array([r[0] for r in rows]), np.array([int(r[1]) for r in rows]), np.array([int(r[2]) for r in rows]))
+
+
+def measure(bam, bed, profile=False):
+    """Run samtools on `bam` for the amplicons in `bed`; returns (targets, depths, stats),
+    plus the per-base (contigs, positions, depths) profile when profile=True."""
     targets = parse_bedcov(samtools("bedcov", bed, bam))
-    depths = np.array([int(line.split("\t")[2]) for line in samtools("depth", "-a", "-b", bed, bam).splitlines() if line])
-    return targets, depths, parse_stats(samtools("stats", bam))
+    prof = depth_profile(samtools("depth", "-a", "-b", bed, bam))
+    result = (targets, prof[2], parse_stats(samtools("stats", bam)))
+    return result + (prof,) if profile else result

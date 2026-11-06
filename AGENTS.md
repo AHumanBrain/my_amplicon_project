@@ -25,7 +25,7 @@ tool designs, screens and packs. Read `README.md` for detail; this file is the o
         │  python analysis/analyze.py --reads "x_R{1,2}.fastq.gz" --bed <prefix>_pool_N.bed \
         │      --primers <prefix>_pool_N_trimming.fasta --genome <reference.fa> --outdir results   (one run per pool)
         ▼
- results/<sample>/: sorted BAM, target_coverage.tsv, <sample>_balancing_feedback.json, _target_summary.tsv, _uniformity.png, _summary.json
+ results/<sample>/: sorted BAM, target_coverage.tsv, <sample>_balancing_feedback.json, _target_summary.tsv, _uniformity.png, _coverage_track.png, _summary.json
         │  python design.py --feedback <json> --targets targets.tsv --project panel.toml
         ▼
  <prefix>_rebalancing_recipe.csv (+ redesign of targets flagged REDESIGN)
@@ -67,7 +67,7 @@ change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `re
 ## Map
 
 `design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) · `core/chain.py` (chain-layout solver) · `core/uniqueness.py` (genome k-mer copy counts for the repeat screen) ·
-`analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `generate_simulated_fastq.py`) ·
+`analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `plot_coverage.py`, `generate_simulated_fastq.py`) ·
 `scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `examples/sars2/` (SARS-CoV-2 reference + ARTIC v3 scheme) · `research/` (`plexity_study/`, `benchmark_sars2/`: unmaintained) · `docs/` (README figures) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
