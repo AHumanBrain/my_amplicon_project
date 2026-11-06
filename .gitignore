@@ -1,6 +1,5 @@
 # Data (Large)
-ncbi_data/*
-!ncbi_data/.gitkeep
+ncbi_data/
 # NOTE: the E. coli reference in common_refs/ is tracked on purpose (examples/CI).
 # Other genomes you add there are ignored:
 common_refs/*

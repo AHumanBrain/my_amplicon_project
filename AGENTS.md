@@ -66,9 +66,9 @@ change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `re
 
 ## Map
 
-`design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) · `core/uniqueness.py` (genome k-mer copy counts for the repeat screen) ·
+`design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) · `core/chain.py` (chain-layout solver) · `core/uniqueness.py` (genome k-mer copy counts for the repeat screen) ·
 `analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `generate_simulated_fastq.py`) ·
-`scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `examples/sars2/` (SARS-CoV-2 reference + ARTIC v3 scheme) · `research/` (`plexity_study/`, `igv_showcase/`, `benchmark_sars2/`: unmaintained) · `panel.example.toml` · `test_design.py`.
+`scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `examples/sars2/` (SARS-CoV-2 reference + ARTIC v3 scheme) · `research/` (`plexity_study/`, `benchmark_sars2/`: unmaintained) · `docs/` (README figures) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
 SARS-CoV-2 (30 kb, `examples/sars2/`, `design/targets/sars2_*.tsv`) is the development and test genome: fast, relevant, and the real-read check uses it; E. coli is for scale tests only ·
