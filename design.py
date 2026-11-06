@@ -29,7 +29,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from tqdm import tqdm
 
-from core import uniqueness
+from core import chain, uniqueness
 from core.biophysics import BioConfig, get_end_stability_dg, get_heterodimer_dg, get_homodimer_dg
 
 log = logging.getLogger("design")
@@ -693,6 +693,88 @@ def screen_targets(targets, fastas, mode, max_hits, rescue=False, force_multipri
     return [t for t in targets if t['name'] not in rejected], list(rejected.values()), True
 
 
+def chain_windows(row, default_range, step):
+    """Sliding-window pseudo-rows (region row -> many overlapping windows) that supply candidate amplicons."""
+    name = row['name']
+    g = lambda k: (row.get(k) or '').strip()  # noqa: E731
+    if g('sequence') or not (g('reference') and g('start') and g('end')):
+        raise ValueError(f"{name}: the chain layout needs 'reference' + 'start' + 'end' (a region), not a sequence.")
+    if any(g(k) for k in ('junctions', 'span', 'avoid')) or g('strand') not in ('', '+'):
+        raise ValueError(f"{name}: the chain layout does not support junctions, span, avoid or minus-strand rows.")
+    s, e = int(g('start')), int(g('end'))
+    lo, hi = int(g('amplicon_min') or default_range[0]), int(g('amplicon_max') or default_range[1])
+    if e - s + 1 < lo:
+        raise ValueError(f"{name}: region ({e - s + 1} bp) is shorter than the minimum amplicon ({lo} bp).")
+    starts = sorted(set(range(s, e - lo + 2, step)) | {max(s, e - hi + 1)})
+    rows = []
+    for j, x in enumerate(starts):
+        y = min(x + hi - 1, e)
+        rows.append({'name': f"{name}~w{j:04d}", 'reference': g('reference'), 'start': str(x), 'end': str(y),
+                     'amplicon_min': str(min(lo, y - x + 1)), 'amplicon_max': str(min(hi, y - x + 1))})
+    return rows, (s, e), hi
+
+
+def run_chain_mode(args, refs, dbs, spec_fastas, rows):
+    """Cover every region (target row) completely: candidates from sliding windows, chained with guaranteed overlap."""
+    windows, regions, hi_max = [], {}, 0
+    for row in rows:
+        try:
+            wrows, span, hi = chain_windows(row, (args.amplicon_min, args.amplicon_max), args.chain_step)
+        except ValueError as e:
+            sys.exit(f"error: {e}")
+        windows += wrows
+        regions[row['name']] = (row['reference'].strip(), span)
+        hi_max = max(hi_max, hi)
+    failed, targets = [], []
+    for row in windows:
+        t, err = resolve_target(row, refs, (args.amplicon_min, args.amplicon_max))
+        (targets.append(t) if t else failed.append(err))
+    targets, _, _ = screen_targets(targets, spec_fastas, args.uniqueness_screen, args.max_hits, False, args.force_multiprime)
+    opts = dict(dbs=dbs, max_hits=args.max_hits, force_multiprime=args.force_multiprime, rescue=False,
+                num_candidates=args.num_candidates, max_product=args.max_product, tails=resolve_tails(args))
+    log.info("Chain layout: %d region(s), %d sliding windows (step %d bp) supply candidate amplicons.",
+             len(regions), len(targets), args.chain_step)
+    with multiprocessing.Pool(os.cpu_count(), initializer=_init_worker, initargs=(dict(CFG), refs, opts)) as pool:
+        results = list(tqdm(pool.imap_unordered(_work, targets), total=len(targets), desc="Designing candidates"))
+    by_region = {name: {} for name in regions}
+    for tid, cands, _ in results:
+        for c in cands or ():
+            by_region[tid.rsplit('~w', 1)[0]][(c['start'], c['end'], c['fwd'], c['rev'])] = c   # dedupe across windows
+    CFG['max_cross'] = args.max_cross_product if args.max_cross_product is not None else hi_max
+    compat = lambda c, members: is_compatible(c, members, True)[0]   # noqa: E731
+    pools, failed = [[], []], []
+    for name, (contig, (s, e)) in regions.items():
+        cands = sorted(by_region[name].values(), key=lambda c: (c['start'], c['end'], c['fwd'], c['rev']))
+        log.info("%s: %d candidate amplicons; chaining...", name, len(cands))
+        placed, gaps = chain.chain_region(cands, s - 1, e, pools, compat, args.chain_overlap)
+        for k, c in enumerate(placed, 1):
+            c['target_id'] = f"{sanitize_name(name)}_{k:03d}"
+            c['name'] = f"{c['target_id']}_amplicon_S{c['strategy']}_{c['rank']}"
+            c['rank_used'] = c['rank']
+        for lo, hi in gaps:
+            failed.append(f"{name}: no amplicon chain covers {lo + 1}-{hi} (insert coordinates, 1-based): no compatible "
+                          f"candidate bridges it with a {args.chain_overlap} bp insert overlap.")
+    pools = [sorted(p, key=lambda c: (c['contig'], c['start'])) for p in pools if p]
+    gaps = tiling_gaps(pools)
+    if not pools:
+        log.error("No amplicons found for any region.")
+        sys.exit(1)
+    if gaps:
+        os.makedirs(os.path.dirname(args.output_prefix) or '.', exist_ok=True)
+        with open(f"{args.output_prefix}_tiling_gaps.tsv", 'w') as f:
+            f.write("contig\tstart\tend\tlength\n" + "".join(f"{c}\t{l}\t{h}\t{h - l}\n" for c, l, h in gaps))
+    log.info("%d amplicons -> %d pool(s) %s; %d uncovered stretch(es)", sum(len(p) for p in pools), len(pools),
+             [len(p) for p in pools], len(failed))
+    write_outputs(pools, args.output_prefix, failed)
+    n = sum(len(p) for p in pools)
+    manifest = build_manifest(args, 'chain', pools, failed, n, gaps)
+    with open(f"{args.output_prefix}_manifest.json", 'w') as f:
+        json.dump(manifest, f, indent=2)
+    log.info("Run manifest: %s_manifest.json", args.output_prefix)
+    for reason in sorted(set(failed)):
+        log.warning("Failed: %s", reason)
+
+
 def run_design_mode(args):
     refs = load_references(args.reference)
     spec_fastas = args.specificity_fasta or args.reference
@@ -704,6 +786,8 @@ def run_design_mode(args):
 
     failed, targets = [], []
     rows = read_targets(args.targets)
+    if args.layout == 'chain':
+        return run_chain_mode(args, refs, dbs, spec_fastas, rows)
     for row in rows:
         t, err = resolve_target(row, refs, (args.amplicon_min, args.amplicon_max))
         (targets.append(t) if t else failed.append(err))
@@ -854,7 +938,8 @@ PROJECT_SCHEMA = {
                'num_candidates': ('num_candidates', 'int'), 'monte_carlo_iters': ('monte_carlo_iters', 'int'),
                'seed': ('seed', 'int'), 'rescue': ('rescue', 'bool'), 'force_sparse': ('force_sparse', 'bool'),
                'force_single_pool': ('force_single_pool', 'bool'), 'force_multiprime': ('force_multiprime', 'bool'),
-               'uniqueness_screen': ('uniqueness_screen', 'str')},
+               'uniqueness_screen': ('uniqueness_screen', 'str'), 'chain_step': ('chain_step', 'int'),
+               'chain_overlap': ('chain_overlap', 'int')},
     'tails': {'forward': ('fwd_tail', 'str'), 'reverse': ('rev_tail', 'str'), 'enabled': ('no_tails', 'not')},
     'primers': {'min_size': ('primer_min_size', 'int'), 'max_size': ('primer_max_size', 'int'),
                 'min_gc': ('primer_min_gc', 'float'), 'max_gc': ('primer_max_gc', 'float'),
@@ -947,7 +1032,7 @@ def build_manifest(args, layout, pools, failed, n_requested, gaps=()):
         'options': {k: getattr(args, k) for k in (
             'layout', 'max_pools', 'max_hits', 'amplicon_min', 'amplicon_max', 'max_product', 'max_cross_product',
             'num_candidates', 'monte_carlo_iters', 'seed', 'rescue', 'force_sparse', 'force_single_pool',
-            'force_multiprime', 'uniqueness_screen', 'fwd_tail', 'rev_tail', 'no_tails', 'max_self_dimer_dg', 'max_heterodimer_dg',
+            'force_multiprime', 'uniqueness_screen', 'chain_step', 'chain_overlap', 'fwd_tail', 'rev_tail', 'no_tails', 'max_self_dimer_dg', 'max_heterodimer_dg',
             'max_end_stability_dg', 'primer_min_size', 'primer_max_size', 'primer_min_gc', 'primer_max_gc',
             'primer_min_tm', 'primer_max_tm')},
         'inputs': {'targets': _file_info(args.targets), 'reference': [_file_info(f) for f in args.reference],
@@ -1015,9 +1100,14 @@ def build_parser():
     g.add_argument('--max-cross-product', type=int, default=None,
                    help="Primers of different targets in one pool must not face each other closer than this (bp; 0 disables). "
                         "Default: 1000 for sparse layouts, the max amplicon size for tiled (A and C share a pool, ~2 amplicons apart).")
-    g.add_argument('--layout', choices=['auto', 'tiled', 'sparse'], default='auto',
+    g.add_argument('--layout', choices=['auto', 'tiled', 'sparse', 'chain'], default='auto',
                    help="tiled: at most 2 pools by position (A,C | B,D); sparse: fewest compatible pools; "
-                        "auto: tiled if target windows or amplicons overlap.")
+                        "auto: tiled if target windows or amplicons overlap; chain: each target row is a REGION to cover "
+                        "completely, amplicons are placed along it with guaranteed overlap in 2 alternating pools (never chosen by auto).")
+    g.add_argument('--chain-step', type=int, default=60,
+                   help="chain layout: spacing (bp) of the sliding windows that supply candidate amplicons.")
+    g.add_argument('--chain-overlap', type=int, default=10,
+                   help="chain layout: neighbouring amplicon INSERTS (amplicon minus primers) must overlap by at least this many bp.")
     g.add_argument('--max-pools', type=int, default=0, help="Sparse layout: keep at most this many pools (0 = no limit).")
     t = p.add_argument_group('Thresholds (kcal/mol)')
     t.add_argument('--max-self-dimer-dg', type=float, default=CFG['self_dimer'])

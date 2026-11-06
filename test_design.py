@@ -758,6 +758,62 @@ class TestPrimerLimits:
         assert seen == [19, 17, 19]
 
 
+class TestChain:
+    @staticmethod
+    def amp(start, end, rank=0):
+        return {"start": start, "end": end, "fwd": "A" * 20, "rev": "T" * 20, "rank": rank}
+
+    @staticmethod
+    def no_overlap(c, members):
+        return all(c["end"] <= m["start"] or c["start"] >= m["end"] for m in members)
+
+    def test_chain_covers_the_region_with_the_required_insert_overlap(self):
+        from core import chain
+        cands = [self.amp(s, s + 380) for s in range(0, 2000, 40)]
+        pools = [[], []]
+        placed, gaps = chain.chain_region(cands, 0, 2000, pools, self.no_overlap, overlap=15)
+        assert gaps == [] and placed[0]["start"] <= 25 and placed[-1]["end"] >= 2000 - 25
+        for a, b in zip(placed, placed[1:]):
+            assert chain.insert_span(b)[0] <= chain.insert_span(a)[1] - 15          # inserts overlap by >= 15
+            assert a["pool"] != b["pool"]                                           # neighbours alternate pools
+        for pool in pools:                                                          # same pool never overlaps
+            ordered = sorted(pool, key=lambda c: c["start"])
+            assert all(x["end"] <= y["start"] for x, y in zip(ordered, ordered[1:]))
+        assert sorted(c["start"] for c in pools[0] + pools[1]) == [c["start"] for c in placed]
+
+    def test_chain_is_deterministic(self):
+        from core import chain
+        cands = [self.amp(s, s + 350 + (s % 3) * 20, rank=s % 5) for s in range(0, 3000, 30)]
+        runs = [chain.chain_region(list(cands), 0, 3000, [[], []], self.no_overlap)[0] for _ in range(2)]
+        assert [(c["start"], c["end"]) for c in runs[0]] == [(c["start"], c["end"]) for c in runs[1]]
+
+    def test_unbridgeable_region_reports_the_gap_and_continues_after_it(self):
+        from core import chain
+        left = [self.amp(s, s + 380) for s in range(0, 500, 50)]               # reaches about 880
+        right = [self.amp(s, s + 380) for s in range(1300, 2000 - 380 + 1, 50)]  # nothing between 880 and ~1320
+        placed, gaps = chain.chain_region(left + right, 0, 2000, [[], []], self.no_overlap)
+        assert len(gaps) == 1 and 800 < gaps[0][0] < 900 and 1300 < gaps[0][1] < 1400
+        assert placed[0]["start"] <= 25 and placed[-1]["end"] >= 1975
+
+    def test_backtracks_out_of_a_dead_end(self):
+        from core import chain
+        # A -> D (furthest) -> E -> H, but H dimerises with D (same pool): the search must back up and use C instead of D
+        A, D, C, E, H = (self.amp(0, 400), self.amp(340, 800), self.amp(330, 640), self.amp(560, 900), self.amp(840, 1500))
+
+        def compat(c, members):
+            return self.no_overlap(c, members) and not (c["start"] == 840 and any(m["start"] == 340 for m in members))
+        placed, gaps = chain.chain_region([A, D, C, E, H], 0, 1500, [[], []], compat, overlap=10)
+        assert gaps == [] and [c["start"] for c in placed] == [0, 330, 560, 840]
+
+    def test_compat_rejects_are_respected(self):
+        from core import chain
+        cands = [self.amp(s, s + 380) for s in range(0, 2000, 40)]
+        banned = {(c["start"], c["end"]) for c in cands if c["start"] % 80 == 40}
+        placed, gaps = chain.chain_region(cands, 0, 2000, [[], []],
+                                          lambda c, m: (c["start"], c["end"]) not in banned and self.no_overlap(c, m))
+        assert not any((c["start"], c["end"]) in banned for c in placed)
+
+
 class TestSimulatorAndFixture:
     def test_simulator_deterministic_and_writes_truth(self, tmp_path):
         import generate_simulated_fastq as sim

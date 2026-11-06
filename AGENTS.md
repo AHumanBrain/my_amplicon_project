@@ -45,6 +45,10 @@ For RNA: design on the **transcript** and pass `--specificity-fasta transcripts.
   Cross-target products are blocked only below the max amplicon size (A and C share a pool ~2 amplicons apart).
   Check `tiling_gaps`: neighbours overlapping by < 2 primer lengths leave bases uncovered after primer trimming.
 - **sparse**: fewest compatible pools (Monte Carlo first-fit); facing primers of different targets closer than 1000 bp cannot share a pool.
+- **chain** (`--layout chain`, never chosen by `auto`): each target row is a REGION to cover completely (reference/start/end only). Sliding windows
+  (`--chain-step`) supply candidate amplicons; `core/chain.py` chains them left to right with a guaranteed insert overlap (`--chain-overlap`),
+  alternating 2 pools, backtracking when a choice dead-ends. Uncovered stretches are listed in `failed`. SARS-CoV-2 whole genome: 99.5% covered
+  (ARTIC 99.6%), 114 amplicons in 2 pools, but a full run takes about 5 minutes (dimer thermodynamics against growing pools).
 
 ## Reading a result
 `<prefix>_manifest.json` has inputs (sha256), options, layout, per-pool targets, `failed`, `tiling_gaps`, outputs and `next_steps`.
