@@ -55,7 +55,7 @@ Viewer near-matches (≥16 aligned bp, ≤1 mismatch, exact 3' end) are informat
 ```bash
 python -m pytest test_design.py -q                   # fast; BLAST is mocked; the end-to-end analysis test skips without bwa/samtools
 python -m pyflakes design.py core analysis scripts
-bash scripts/check_all.sh                            # everything with the REAL tools (conda env), ~20 s; run before any merge
+bash scripts/check_all.sh                            # everything with the REAL tools (conda env), ~1 min; run before any merge
 ```
 Automatic CI (`.github/workflows/ci.yml`) is only lint + unit tests. `real-tools.yml` runs `check_all.sh` on demand. Change design logic ⇒ add a test;
 change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `research/` is not linted or tested.
@@ -64,17 +64,18 @@ change the analysis ⇒ run `check_all.sh`, a unit test alone is not enough. `re
 
 `design.py` (design, packing, feedback, project/manifest) · `core/biophysics.py` (primer3 thermodynamics, KAPA conditions) · `core/uniqueness.py` (genome k-mer copy counts for the repeat screen) ·
 `analysis/analyze.py` (+ `metrics.py`, `balance.py`, `plot_uniformity.py`, `generate_simulated_fastq.py`) ·
-`scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `research/plexity_study/` (unmaintained study + figures) · `panel.example.toml` · `test_design.py`.
+`scripts/` (`design_viewer.py`, `check_all.sh`, `real_data_check.sh` (real reads, needs internet), `genes_to_targets.py`, `make_*_example/fixture.py`) · `examples/sars2/` (SARS-CoV-2 reference + ARTIC v3 scheme) · `research/` (`plexity_study/`, `igv_showcase/`, `benchmark_sars2/`: unmaintained) · `panel.example.toml` · `test_design.py`.
 
 ## Decisions already made (do not reopen without the human)
-Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
+SARS-CoV-2 (30 kb, `examples/sars2/`, `design/targets/sars2_*.tsv`) is the development and test genome: fast, relevant, and the real-read check uses it; E. coli is for scale tests only ·
+primer size, GC and Tm are options (defaults 19-21 nt, 40-60%, Tm 59-61 are unchanged; they cannot design a 38% GC genome, use a `[primers]` section) · Tails are ON by default (truncated Illumina P5/P7; reads start at the gene-specific primer, so trimming uses specific primers only) ·
 hairpin clamp deleted · no Docker · analysis is cutadapt + bwa + samtools + Python (Nextflow, GATK, Picard, FastQC, MultiQC removed; Picard parity verified) ·
 no variant calling (amplicon reads are >99% start-duplicates: no duplicate-aware tools) · plexity study lives in `research/` · merge to `main` is the human's call.
 
 ## Open items (say so if relevant, do not paper over)
 Tiling does not optimise neighbour overlap (it reports gaps) · strand specificity is decided at the RT step and cannot be verified from amplicon reads ·
 dimer screening uses gene-specific sequence, not the tailed oligo · packing is a heuristic with no optimality guarantee · near-match search is informational ·
-cross-product distance (1000 bp) is a chosen default, not a validated one · the repeat screen (`--uniqueness-screen`) is a conservative pre-filter (catches about half of repeat failures on human, no false rejections seen on 79 regions) and is off by default for genomes over ~500 Mb · targets must be chosen for specificity: random or repeat-derived regions are out of scope, the tool fails them rather than designing non-specific primers.
+cross-product distance (1000 bp) is a chosen default, not a validated one · our thermodynamic metrics do not predict real amplicon coverage (benchmark_sars2: |rho| <= 0.19) · the repeat screen (`--uniqueness-screen`) is a conservative pre-filter (catches about half of repeat failures on human, no false rejections seen on 79 regions) and is off by default for genomes over ~500 Mb · targets must be chosen for specificity: random or repeat-derived regions are out of scope, the tool fails them rather than designing non-specific primers.
 The in-silico plexity study (README section 4, code in `research/`) rests on stated assumptions: hot-start is modelled as dimers extending at 55 °C instead of 37 °C, "risky" = occupancy ≥ 0.42% (calibrated to the tool's own limit, no sensitivity run), the plain baseline is 250 nM per primer at any plexity, and the uniformity model is uncalibrated. Quote it as a model, never as a result.
 
 ## Ask the human when

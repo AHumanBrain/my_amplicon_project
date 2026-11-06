@@ -1,11 +1,12 @@
 # SARS-CoV-2 benchmark (unmaintained)
 
-A benchmark with ground truth: the public ARTIC v3 scheme and a real MiSeq run of it (the data behind
+A benchmark with ground truth: the public ARTIC v3 scheme (`examples/sars2/`) and a real MiSeq run of it (the data behind
 `scripts/real_data_check.sh`). Run that script first and pass its workdir below. Not linted or tested.
+The findings are now in the main README (Verified) and the fix is in `design.py` (`--primer-*` options).
 
 | Script | What it does |
 |---|---|
-| `make_tiles.py` | 99 overlapping 400 bp windows (step 300) over NC_045512.2 as a tiled targets table |
+| `make_tiles.py` | (output is committed as `design/targets/sars2_tiles.tsv`) 99 overlapping 400 bp windows (step 300) over NC_045512.2 as a tiled targets table |
 | `predict_dropouts.py <workdir>` | correlates our thermodynamic metrics for the ARTIC primers with the real per-amplicon coverage |
 | `relaxed_design.py` | `design.py` with wider primer size/GC/Tm limits, to test why the default design fails |
 

@@ -4,16 +4,17 @@ import numpy as np, primer3
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from core import biophysics as bp
-W = sys.argv[1]   # workdir of scripts/real_data_check.sh
-ref = "".join(l.strip() for l in open(f"{W}/ref.fa") if l[0] != ">").upper()
+W = sys.argv[1]   # workdir of scripts/real_data_check.sh (holds out/sample1/target_coverage.tsv)
+EX = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'examples', 'sars2')
+ref = "".join(l.strip() for l in open(EX + "/NC_045512.2.fa") if l[0] != ">").upper()
 prim = {}
 k = None
-for l in open(f"{W}/primers.fasta"):
+for l in open(EX + "/artic_v3_primers.fasta"):
     l = l.strip()
     if l[0] == ">": k = l[1:]; prim[k] = ""
     else: prim[k] += l
 cov = {r["name"]: float(r["mean_coverage"]) for r in csv.DictReader(open(f"{W}/out/sample1/target_coverage.tsv"), delimiter="\t")}
-bed = {l.split()[3]: (int(l.split()[1]), int(l.split()[2])) for l in open(f"{W}/amplicons.bed")}
+bed = {l.split()[3]: (int(l.split()[1]), int(l.split()[2])) for l in open(EX + "/artic_v3_amplicons.bed")}
 tm = lambda s: primer3.calc_tm(s, mv_conc=50, dv_conc=2.5, dntp_conc=1.2, dna_conc=50)
 gc = lambda s: (s.count("G") + s.count("C")) / len(s)
 pool = lambda n: int(n[3:].split("_")[0]) % 2        # ARTIC convention: odd amplicons pool 1, even pool 2

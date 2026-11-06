@@ -30,7 +30,7 @@ flowchart LR
 
 ## What a design looks like
 
-A 250-gene design on the *E. coli* K-12 genome (`design/targets/ecoli_spread_250.tsv`), followed by in-silico multiplex PCR: one simulated tube per pool, reads trimmed and aligned by `analysis/analyze.py`, shown in IGV (igv.js).
+A scale demo: a 250-gene design on the *E. coli* K-12 genome (`design/targets/ecoli_spread_250.tsv`), followed by in-silico multiplex PCR: one simulated tube per pool, reads trimmed and aligned by `analysis/analyze.py`, shown in IGV (igv.js).
 
 ![250 targets, 250 amplicons, 4 pools](docs/igv/overview.png)
 
@@ -46,18 +46,20 @@ These reads are **simulated from the designed amplicons**, so 100% on-target and
 micromamba create -n amplicon_pipeline -f conda-linux-64.lock    # exact versions; or environment.yml
 micromamba activate amplicon_pipeline
 
-python design.py --project panel.example.toml                    # 21 E. coli genes, ~10 s -> 1 pool
-python scripts/design_viewer.py --prefix design/output/housekeeping_demo \
-    --reference common_refs/ecoli_genome.fna --outdir panel_view # open panel_view/specificity.html
+python design.py --project panel.example.toml                    # SARS-CoV-2, 99 overlapping tiles, ~2 min -> 2 pools
+python scripts/design_viewer.py --prefix design/output/sars2_demo \
+    --reference examples/sars2/NC_045512.2.fa --outdir panel_view # open panel_view/specificity.html
 
 # after sequencing one pool:
-python analysis/analyze.py --reads "raw_data/S_R{1,2}.fastq.gz" --genome common_refs/ecoli_genome.fna \
-    --bed design/output/housekeeping_demo_pool_1.bed \
-    --primers design/output/housekeeping_demo_pool_1_trimming.fasta --outdir results
+python analysis/analyze.py --reads "raw_data/S_R{1,2}.fastq.gz" --genome examples/sars2/NC_045512.2.fa \
+    --bed design/output/sars2_demo_pool_1.bed \
+    --primers design/output/sars2_demo_pool_1_trimming.fasta --outdir results
 python design.py --project panel.example.toml --feedback results/S/S_balancing_feedback.json
 ```
 
-A project file (`panel.example.toml`) holds the options; command-line flags override it. Every design run also writes `<prefix>_manifest.json`. `AGENTS.md` is the operating guide for AI assistants.
+A project file (`panel.example.toml`) holds the options; command-line flags override it. Every design run also writes `<prefix>_manifest.json`.
+
+**Development genome:** SARS-CoV-2 (30 kb) is the development and test genome. Design, BLAST and `check_all.sh` run in seconds to minutes, and the real-read check uses the same genome. `examples/sars2/` holds the reference and the ARTIC v3 primer scheme; `design/targets/sars2_{tiles,genes}.tsv` are the target sets. E. coli (`common_refs/`) is kept for scale tests (up to 250 targets) and the plexity study. The example design is not clean: with this tool's default primer limits only 66 of the 99 tiles design, so `panel.example.toml` sets wider limits in its `[primers]` section, and it still reports 10 failed tiles and 49 tiling gaps (3,955 bp uncovered after primer trimming). `AGENTS.md` is the operating guide for AI assistants.
 
 ## Targets
 
@@ -73,7 +75,7 @@ One TSV row per target: either a region (`reference`, `start`, `end`, 1-based in
 
 **RNA:** design on the transcript and screen against transcriptome *and* genome (`--specificity-fasta transcripts.fa genome.fa`). The report then shows genomic amplification: on a synthetic 3-exon gene, a junction-spanning primer pair has no genomic product, while the unconstrained pair predicts a same-size one (`python scripts/make_rna_example.py`).
 
-Ready-made E. coli sets live in `design/targets/`: `housekeeping.tsv` (21 classic genes), `ecoli_spread_{50,100,250}.tsv` (genome-wide, evenly spaced) and `ecoli_tiled_{12,100}.tsv` (overlapping tiles). `scripts/make_ecoli_targets.py` regenerates them.
+Ready-made sets live in `design/targets/`: `sars2_tiles.tsv` (99 overlapping tiles) and `sars2_genes.tsv` (10 ORFs, checked for start and stop codons), plus E. coli `ecoli_spread_{50,100,250}.tsv` (genome-wide, evenly spaced) and `ecoli_tiled_100.tsv`. `scripts/make_ecoli_targets.py` regenerates them.
 
 ## Design
 
@@ -102,13 +104,13 @@ flowchart LR
 
 `--layout auto` (default) picks tiled when target windows overlap. Tiled runs also report bases left uncovered after primer trimming (neighbours overlapping by less than two primer lengths): `<prefix>_tiling_gaps.tsv`.
 
-**Thermodynamics:** KAPA HiFi conditions (2.5 mM Mg²⁺, 1.2 mM dNTP) on every primer3 call; primer 19-21 nt, Tm 59-61 °C; dimer limits self −9, heterodimer −8, 3′ end −6 kcal/mol (`--max-*-dg`).
+**Thermodynamics:** KAPA HiFi conditions (2.5 mM Mg²⁺, 1.2 mM dNTP) on every primer3 call; primer 19-21 nt, 40-60% GC, Tm 59-61 °C by default (`--primer-min-size/-max-size`, `--primer-min-gc/-max-gc`, `--primer-min-tm/-max-tm`, or a `[primers]` section; AT-rich templates need wider limits, see Verified); dimer limits self −9, heterodimer −8, 3′ end −6 kcal/mol (`--max-*-dg`).
 
 **Outputs** (`--output-prefix`): `_order.csv` (pool, name, sequence, role), `_pool_N.csv` (per pair, with hit counts and `predicted_products`), `_pool_N.bed`, `_pool_N_trimming.fasta`, `_manifest.json`, and `_failed_targets.txt` when relevant.
 
-**Key flags:** `--layout`, `--max-pools`, `--max-hits`, `--amplicon-min/max`, `--max-cross-product`, `--fwd-tail/--rev-tail/--no-tails`, `--seed` (same inputs + seed = identical output), `--rescue` (shift the window of unconstrained region targets).
+**Key flags:** `--layout`, `--max-pools`, `--max-hits`, `--amplicon-min/max`, `--primer-*` limits, `--max-cross-product`, `--fwd-tail/--rev-tail/--no-tails`, `--seed` (same inputs + seed = identical output), `--rescue` (shift the window of unconstrained region targets).
 
-**Repeat screen:** before primer design, `--uniqueness-screen` (default `auto`) counts every 19-mer of each target across the specificity FASTA(s) and fails targets where no pair of genome-unique primer sites can fit the amplicon range, with the reason. It never rejects what the full search would accept on the human test below (0 of 79 designed regions rejected) but it is a pre-filter: it caught 12 of the 21 repeat regions that failed, the other 9 fail later in the normal search. `auto` runs it for references up to about 500 Mb (seconds); for a human-size genome it takes minutes, so use `--uniqueness-screen on`. Targets eligible for `--rescue` and runs with `--force-multiprime` skip it.
+**Repeat screen:** before primer design, `--uniqueness-screen` (default `auto`) counts every k-mer (19, or the minimum primer size if smaller) of each target across the specificity FASTA(s) and fails targets where no pair of genome-unique primer sites can fit the amplicon range, with the reason. It never rejects what the full search would accept on the human test below (0 of 79 designed regions rejected) but it is a pre-filter: it caught 12 of the 21 repeat regions that failed, the other 9 fail later in the normal search. `auto` runs it for references up to about 500 Mb (seconds); for a human-size genome it takes minutes, so use `--uniqueness-screen on`. Targets eligible for `--rescue` and runs with `--force-multiprime` skip it.
 
 **Inspect specificity:** `scripts/design_viewer.py` writes a self-contained `specificity.html` plus IGV-loadable BED tracks (untested in IGV desktop). It lists 3′-anchored near-match priming sites (≥ 16 aligned bp, ≤ 1 mismatch) that exact-hit screening cannot see.
 
@@ -169,16 +171,18 @@ Real BLAST+, bwa, samtools and cutadapt, simulated reads. Run everything with `b
 
 | Test | Result |
 |---|---|
-| Housekeeping panel (21 genes) | 1 pool; every primer has exactly one perfect genomic hit |
+| SARS-CoV-2 ORFs, sparse (`sars2_genes`), wider primer limits | 10/10 designed, 1 pool |
+| **SARS-CoV-2 tiled, 99 tiles, tool-default primer limits** | **66/99 designed**, 33 failed, **11,680 bp (39%) uncovered after primer trimming**. The defaults (19-21 nt, GC 40-60%) cannot place primers on a 38% GC genome; the 196 real ARTIC primers are 22-30 nt |
+| SARS-CoV-2 tiled, same tiles, wider limits (`panel.example.toml`: 20-30 nt, GC >= 30%, Tm 57-64) | 89/99 designed in 2 pools [45, 44], 10 failed, 3,955 bp uncovered (49 stretches), ~2.4 min. ARTIC covers the genome with 98 amplicons. Neighbour overlap is not optimised |
+| Do our metrics predict real ARTIC amplicon coverage? (`research/benchmark_sars2/`) | No. Real coverage spans 44x-1522x; Spearman correlation with 12 metrics (Tm, GC, dimers, 3' stability, amplicon length and GC, ...) is |rho| <= 0.19, none significant at p < 0.05 (one dataset, one chemistry) |
 | 100 genes spread over the genome (`ecoli_spread_100`) | 100/100 designed, 3 pools [58, 37, 5], 128 s |
 | 250 genes spread over the genome (`ecoli_spread_250`) | 250/250 designed, 4 pools [89, 83, 53, 25], no failures, no unintended predicted products; about 11 min with 5 packing iterations. Simulated reads: every pool mean about 380×, fold-80 1.26–1.29 (see IGV above) |
 | Tiled design, 100 contiguous tiles (`ecoli_tiled_100`) | **Only 75/100 designed** (25 failed: no compatible pair in the tiled pool), 41 tiling gaps. A dense tiled panel is hard for this packer; read the failure list before ordering |
-| Tiled design (12 overlapping tiles) | 2 pools of 6, alternating; reports 60 bp uncovered after primer trimming at three 20 bp overlaps |
 | RNA junction example | junction-spanning pair: no genomic product; unconstrained pair: same-size genomic product |
 | Analysis, 21-gene panel | 6 s; 6,299 of 6,300 pairs kept; mean 397×, fold-80 1.33; identical to the Picard run |
 | **Real reads:** public MiSeq ARTIC v3 SARS-CoV-2 run (98 amplicons, 2 tiled pools, 27.7k pairs); `bash scripts/real_data_check.sh`, about 1 min, needs internet | 80% of pairs kept with `--either-orientation` (40% without), 99.96% mapped, mean 409×, **fold-80 5.6** (simulated: 1.3); all 98 amplicons covered, lowest 44× (amp98), with the known weak ARTIC v3 amplicons 64 and 70 among the lowest five; the recipe asks for 0.27× to 9× concentration changes |
 | Human GRCh38 (primary assembly), 100 random 400 bp regions with simple-repeat and GC filtering; **not a panel, arbitrary regions** | 79 designed in 3 pools [45, 26, 8], 18 min; the 21 failed regions are high-copy repeats (median about 26,000 genomic matches vs 1). The repeat screen alone took 6.4 min on this genome and caught 12 of the 21 |
-| Unit tests | 78 (76 plus two end-to-end tests that skip without bwa/samtools) |
+| Unit tests | 84 (82 plus two end-to-end tests that skip without bwa/samtools) |
 
 **Limits:** the simulated-read results are uniform by construction. The analysis has been run on one real public dataset, which is viral, single-sample and not designed by this tool, so the rebalancing recipe's effect is untested, and no human amplicon reads have been run (the hosts that hold them are unreachable from the dev sandbox); targets shorter than the minimum amplicon cannot be designed; BLAST screening counts exact hits (near-matches are informational); packing is a heuristic; the 1000 bp cross-product distance is a chosen default, not a validated one.
 
@@ -217,9 +221,11 @@ Brute-force screening alone places roughly 145 targets per pool under the plain 
 design.py                    design, packing, feedback, project file, manifest
 core/biophysics.py           primer3 thermodynamics (KAPA conditions)
 analysis/                    analyze.py, metrics.py, balance.py, plot_uniformity.py, simulator
-scripts/                     design_viewer.py, check_all.sh, make_ecoli_targets.py, make_rna_example.py, ...
-design/targets/              E. coli target sets      common_refs/   E. coli K-12 genome + GFF
-research/                    plexity_study/ and igv_showcase/ (unmaintained)
+core/uniqueness.py          genome k-mer copy counts for the repeat screen
+scripts/                     design_viewer.py, check_all.sh, real_data_check.sh, make_ecoli_targets.py, ...
+examples/sars2/              SARS-CoV-2 reference + ARTIC v3 scheme (the development genome)
+design/targets/              sars2_* and ecoli_* target sets      common_refs/   E. coli K-12 genome + GFF (scale tests)
+research/                    plexity_study/, igv_showcase/, benchmark_sars2/ (unmaintained)
 docs/igv/                    IGV figures
 test_design.py               unit tests               conda-linux-64.lock · environment.yml
 ```
