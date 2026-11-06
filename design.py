@@ -29,6 +29,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from tqdm import tqdm
 
+from core import uniqueness
 from core.biophysics import BioConfig, get_end_stability_dg, get_heterodimer_dg, get_homodimer_dg
 
 log = logging.getLogger("design")
@@ -41,6 +42,8 @@ CFG = {
     'max_cross': 1000,   # bp; facing primers of different targets in one pool must be farther apart
 }
 RESCUE_SHIFTS = [0, -25, 25, -45, 45]  # bp window shifts tried with --rescue
+SCREEN_K = 19                    # = PRIMER_MIN_SIZE: a primer containing a genome-unique 19-mer is itself unique
+SCREEN_AUTO_MAX_BYTES = 500_000_000   # --uniqueness-screen auto: only for references up to ~500 Mb (a pass takes seconds)
 # Truncated Illumina tails: the 3' 20 nt of the TruSeq Read 1 / Read 2 sequencing-primer sites.
 # A later index PCR completes the adapters. Reads therefore start at the gene-specific primer.
 P5_TAIL = 'ACACGACGCTCTTCCGATCT'   # 5' of every forward (sense) primer
@@ -648,6 +651,42 @@ def resolve_tails(args):
     return tails
 
 
+def screen_targets(targets, fastas, mode, max_hits, rescue=False, force_multiprime=False):
+    """Fail repeat regions early: drop targets in which no pair of genome-unique primer sites fits the amplicon range.
+
+    Counts how often each 19-mer of a target occurs in each specificity FASTA (both strands). A site is usable if it
+    occurs <= max_hits times in EVERY FASTA (the same rule BLAST screening applies). Conservative: a region is only
+    rejected when no unique site pair can exist, so it never rejects what the full search would accept (0 of 79
+    designed regions rejected on GRCh38). Skipped for rescue-eligible targets and with --force-multiprime.
+    Returns (kept_targets, failure_messages, ran).
+    """
+    if mode not in ('auto', 'on', 'off'):
+        raise ValueError(f"uniqueness_screen must be auto, on or off (got '{mode}')")
+    size = sum(os.path.getsize(f) for f in fastas)
+    if mode == 'off' or force_multiprime or (mode == 'auto' and size > SCREEN_AUTO_MAX_BYTES):
+        return targets, [], False
+    constrained = lambda t: bool(t['junctions'] or t['span'] or t['avoid'])   # noqa: E731
+    checked = [t for t in targets if not (rescue and t['coordinate_based'] and not constrained(t))]
+    if not checked:
+        return targets, [], False
+    log.info("Uniqueness screen: counting %d-mers of %d target(s) in %d FASTA(s) (%.0f Mb)...", SCREEN_K, len(checked),
+             len(fastas), size / 1e6)
+    per_fasta = [uniqueness.genome_copy_counts(fa, [t['seq'] for t in checked], SCREEN_K) for fa in fastas]
+    rejected = {}
+    for i, t in enumerate(checked):
+        limit = t['max_hits'] if t['max_hits'] is not None else max_hits
+        lo, hi = t['amp_range']
+        if all(uniqueness.has_primer_pair_site(counts[i], SCREEN_K, lo, hi, limit) for counts in per_fasta):
+            continue
+        worst = min(per_fasta, key=lambda counts: ((counts[i] >= 0) & (counts[i] <= limit)).mean())
+        valid = worst[i] >= 0
+        pct = 100.0 * ((worst[i] <= limit) & valid).sum() / max(valid.sum(), 1)
+        rejected[t['name']] = (f"{t['name']}: repeat region. Only {pct:.0f}% of its {SCREEN_K}-mers occur <= {limit} time(s) "
+                               f"in the genome, and no pair of unique primer sites fits a {lo}-{hi} bp amplicon "
+                               f"(skip this check with --uniqueness-screen off).")
+    return [t for t in targets if t['name'] not in rejected], list(rejected.values()), True
+
+
 def run_design_mode(args):
     refs = load_references(args.reference)
     spec_fastas = args.specificity_fasta or args.reference
@@ -662,6 +701,12 @@ def run_design_mode(args):
     for row in rows:
         t, err = resolve_target(row, refs, (args.amplicon_min, args.amplicon_max))
         (targets.append(t) if t else failed.append(err))
+    targets, screened, _ = screen_targets(targets, spec_fastas, args.uniqueness_screen, args.max_hits,
+                                          args.rescue, args.force_multiprime)
+    if screened:
+        log.info("Uniqueness screen rejected %d of %d target(s) before primer design.", len(screened),
+                 len(screened) + len(targets))
+    failed.extend(screened)
     opts = dict(dbs=dbs, max_hits=args.max_hits, force_multiprime=args.force_multiprime,
                 rescue=args.rescue,
                 num_candidates=args.num_candidates, max_product=args.max_product,
@@ -802,7 +847,8 @@ PROJECT_SCHEMA = {
                'max_product': ('max_product', 'int'), 'max_cross_product': ('max_cross_product', 'int'),
                'num_candidates': ('num_candidates', 'int'), 'monte_carlo_iters': ('monte_carlo_iters', 'int'),
                'seed': ('seed', 'int'), 'rescue': ('rescue', 'bool'), 'force_sparse': ('force_sparse', 'bool'),
-               'force_single_pool': ('force_single_pool', 'bool'), 'force_multiprime': ('force_multiprime', 'bool')},
+               'force_single_pool': ('force_single_pool', 'bool'), 'force_multiprime': ('force_multiprime', 'bool'),
+               'uniqueness_screen': ('uniqueness_screen', 'str')},
     'tails': {'forward': ('fwd_tail', 'str'), 'reverse': ('rev_tail', 'str'), 'enabled': ('no_tails', 'not')},
     'thresholds': {'self_dimer_dg': ('max_self_dimer_dg', 'float'), 'heterodimer_dg': ('max_heterodimer_dg', 'float'),
                    'end_stability_dg': ('max_end_stability_dg', 'float')},
@@ -892,7 +938,7 @@ def build_manifest(args, layout, pools, failed, n_requested, gaps=()):
         'options': {k: getattr(args, k) for k in (
             'layout', 'max_pools', 'max_hits', 'amplicon_min', 'amplicon_max', 'max_product', 'max_cross_product',
             'num_candidates', 'monte_carlo_iters', 'seed', 'rescue', 'force_sparse', 'force_single_pool',
-            'force_multiprime', 'fwd_tail', 'rev_tail', 'no_tails', 'max_self_dimer_dg', 'max_heterodimer_dg',
+            'force_multiprime', 'uniqueness_screen', 'fwd_tail', 'rev_tail', 'no_tails', 'max_self_dimer_dg', 'max_heterodimer_dg',
             'max_end_stability_dg')},
         'inputs': {'targets': _file_info(args.targets), 'reference': [_file_info(f) for f in args.reference],
                    'specificity_fasta': [_file_info(f) for f in (args.specificity_fasta or args.reference)]},
@@ -939,6 +985,9 @@ def build_parser():
                    help="Keep only the largest compatible set; list targets that did not fit.")
     g.add_argument('--force-sparse', action='store_true', help="Never allow overlapping amplicons in one pool.")
     g.add_argument('--force-multiprime', action='store_true', help="Allow multi-copy primers (e.g. 16S rRNA).")
+    g.add_argument('--uniqueness-screen', choices=['auto', 'on', 'off'], default='auto',
+                   help="Fail repeat regions before primer design (no unique primer sites possible). "
+                        "auto: on for references up to ~500 Mb, off for larger genomes (a human-size pass takes minutes).")
     g.add_argument('--rescue', action='store_true',
                    help="Shift the window of coordinate-based, unconstrained targets if no pair passes.")
     a = p.add_argument_group('Adapter tails (5\' of each gene-specific primer)')

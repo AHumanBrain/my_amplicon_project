@@ -603,6 +603,89 @@ class TestAnalysis:
         assert either["n_targets"] == 3 and either["mean_target_coverage"] > 1.8 * default["mean_target_coverage"]
 
 
+class TestUniquenessScreen:
+    @staticmethod
+    def _genome(tmp_path, k=19):
+        rnd = random.Random(7)
+        rnd_seq = lambda n: "".join(rnd.choice("ACGT") for _ in range(n))   # noqa: E731
+        rc = lambda s: s[::-1].translate(str.maketrans("ACGT", "TGCA"))      # noqa: E731
+        unique, rep = rnd_seq(400), rnd_seq(400)
+        # `rep` occurs 4 times: forward, reverse-complemented, lower-case, and in a second record
+        g1 = rnd_seq(2000) + unique + rnd_seq(2000) + rep + rnd_seq(1500) + rc(rep) + rnd_seq(1500) + rep.lower() + "NNNN" + rnd_seq(500)
+        path = tmp_path / "g.fa"
+        path.write_text(f">a\n{g1}\n>b\n{rep}\n")
+        return str(path), unique, rep, g1 + "#" + rep
+
+    def test_counts_match_brute_force_on_both_strands(self, tmp_path):
+        from core import uniqueness as u
+        path, unique, rep, full = self._genome(tmp_path)
+        rc = lambda s: s[::-1].translate(str.maketrans("ACGT", "TGCA"))      # noqa: E731
+        k = 19
+        full_u = full.upper()
+        for query in (rep[:60] + "N" + rep[61:90], unique[:80]):
+            got = u.genome_copy_counts(path, [query], k)[0]
+            for i in range(len(query) - k + 1):
+                w = query[i:i + k].upper()
+                if "N" in w:
+                    assert got[i] == -1
+                    continue
+                want = sum(full_u[j:j + k] == w for j in range(len(full_u) - k + 1))
+                if rc(w) != w:
+                    want += sum(full_u[j:j + k] == rc(w) for j in range(len(full_u) - k + 1))
+                assert got[i] == want, (i, got[i], want)
+
+    def test_pair_site_rule(self):
+        import numpy as np
+        from core import uniqueness as u
+        n, k = 400, 19
+        copies = np.full(n, 5)
+        assert not u.has_primer_pair_site(copies, k, 150, 250, 1)
+        copies[10] = 1                              # forward site only: nothing to pair with
+        assert not u.has_primer_pair_site(copies, k, 150, 250, 1)
+        copies[200] = 1                             # amplicon 10 .. 219 = 209 bp
+        assert u.has_primer_pair_site(copies, k, 150, 250, 1)
+        assert not u.has_primer_pair_site(copies, k, 210, 250, 1)     # 209 < min
+        assert u.has_primer_pair_site(np.full(n, 3), k, 150, 250, 3)  # max_hits raises the bar
+        copies[:] = -1
+        assert not u.has_primer_pair_site(copies, k, 150, 250, 1)
+
+    def _targets(self, genome, unique, rep):
+        refs = design.load_references([genome])
+        rows = [{"name": "uniq", "sequence": unique, "reference": "", "start": "", "end": ""},
+                {"name": "rep", "sequence": rep, "reference": "", "start": "", "end": ""}]
+        return [design.resolve_target(r, refs, (150, 250))[0] for r in rows]
+
+    def test_screen_rejects_repeat_keeps_unique(self, tmp_path):
+        genome, unique, rep, _ = self._genome(tmp_path)
+        targets = self._targets(genome, unique, rep)
+        kept, msgs, ran = design.screen_targets(targets, [genome], "auto", 1)
+        assert ran and [t["name"] for t in kept] == ["uniq"]
+        assert len(msgs) == 1 and msgs[0].startswith("rep: repeat region") and "--uniqueness-screen off" in msgs[0]
+
+    def test_screen_off_switches_and_overrides(self, tmp_path, monkeypatch):
+        genome, unique, rep, _ = self._genome(tmp_path)
+        targets = self._targets(genome, unique, rep)
+        assert design.screen_targets(targets, [genome], "off", 1)[2] is False
+        assert design.screen_targets(targets, [genome], "auto", 1, force_multiprime=True)[2] is False
+        kept, _, _ = design.screen_targets(targets, [genome], "auto", 4)      # 4 copies allowed: nothing rejected
+        assert len(kept) == 2
+        targets[1]["max_hits"] = 4                                            # per-target override
+        assert len(design.screen_targets(targets, [genome], "auto", 1)[0]) == 2
+        monkeypatch.setattr(design, "SCREEN_AUTO_MAX_BYTES", 10)              # big reference: auto skips, 'on' forces
+        assert design.screen_targets(targets, [genome], "auto", 1)[2] is False
+        assert design.screen_targets(targets, [genome], "on", 1)[2] is True
+        with pytest.raises(ValueError, match="auto, on or off"):
+            design.screen_targets(targets, [genome], "maybe", 1)
+
+    def test_rescue_eligible_targets_are_not_screened(self, tmp_path):
+        genome, unique, rep, _ = self._genome(tmp_path)
+        refs = design.load_references([genome])
+        row = {"name": "c", "reference": "a", "start": "2401", "end": "2800", "sequence": ""}
+        t = design.resolve_target(row, refs, (150, 250))[0]
+        assert t["coordinate_based"]
+        assert design.screen_targets([t], [genome], "on", 1, rescue=True)[2] is False
+
+
 class TestSimulatorAndFixture:
     def test_simulator_deterministic_and_writes_truth(self, tmp_path):
         import generate_simulated_fastq as sim

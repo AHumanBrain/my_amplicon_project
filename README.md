@@ -108,6 +108,8 @@ flowchart LR
 
 **Key flags:** `--layout`, `--max-pools`, `--max-hits`, `--amplicon-min/max`, `--max-cross-product`, `--fwd-tail/--rev-tail/--no-tails`, `--seed` (same inputs + seed = identical output), `--rescue` (shift the window of unconstrained region targets).
 
+**Repeat screen:** before primer design, `--uniqueness-screen` (default `auto`) counts every 19-mer of each target across the specificity FASTA(s) and fails targets where no pair of genome-unique primer sites can fit the amplicon range, with the reason. It never rejects what the full search would accept on the human test below (0 of 79 designed regions rejected) but it is a pre-filter: it caught 12 of the 21 repeat regions that failed, the other 9 fail later in the normal search. `auto` runs it for references up to about 500 Mb (seconds); for a human-size genome it takes minutes, so use `--uniqueness-screen on`. Targets eligible for `--rescue` and runs with `--force-multiprime` skip it.
+
 **Inspect specificity:** `scripts/design_viewer.py` writes a self-contained `specificity.html` plus IGV-loadable BED tracks (untested in IGV desktop). It lists 3′-anchored near-match priming sites (≥ 16 aligned bp, ≤ 1 mismatch) that exact-hit screening cannot see.
 
 ## Analysis
@@ -175,7 +177,8 @@ Real BLAST+, bwa, samtools and cutadapt, simulated reads. Run everything with `b
 | RNA junction example | junction-spanning pair: no genomic product; unconstrained pair: same-size genomic product |
 | Analysis, 21-gene panel | 6 s; 6,299 of 6,300 pairs kept; mean 397×, fold-80 1.33; identical to the Picard run |
 | **Real reads:** public MiSeq ARTIC v3 SARS-CoV-2 run (98 amplicons, 2 tiled pools, 27.7k pairs); `bash scripts/real_data_check.sh`, about 1 min, needs internet | 80% of pairs kept with `--either-orientation` (40% without), 99.96% mapped, mean 409×, **fold-80 5.6** (simulated: 1.3); all 98 amplicons covered, lowest 44× (amp98), with the known weak ARTIC v3 amplicons 64 and 70 among the lowest five; the recipe asks for 0.27× to 9× concentration changes |
-| Unit tests | 73 (71 plus two end-to-end tests that skip without bwa/samtools) |
+| Human GRCh38 (primary assembly), 100 random 400 bp regions with simple-repeat and GC filtering; **not a panel, arbitrary regions** | 79 designed in 3 pools [45, 26, 8], 18 min; the 21 failed regions are high-copy repeats (median about 26,000 genomic matches vs 1). The repeat screen alone took 6.4 min on this genome and caught 12 of the 21 |
+| Unit tests | 78 (76 plus two end-to-end tests that skip without bwa/samtools) |
 
 **Limits:** the simulated-read results are uniform by construction. The analysis has been run on one real public dataset, which is viral, single-sample and not designed by this tool, so the rebalancing recipe's effect is untested, and no human amplicon reads have been run (the hosts that hold them are unreachable from the dev sandbox); targets shorter than the minimum amplicon cannot be designed; BLAST screening counts exact hits (near-matches are informational); packing is a heuristic; the 1000 bp cross-product distance is a chosen default, not a validated one.
 
